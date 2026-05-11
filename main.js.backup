@@ -1,12 +1,13 @@
 /**
- * MODULE: main.js
- * PURPOSE: Electron main process - window, IPC handlers, app lifecycle
+ * MODULE: main.js (PearDrop v2)
+ * PURPOSE: Electron main process for PearDrop - P2P file sharing
+ * VERSION: 0.18.0
  * 
  * EXPORTS: None (entry point)
  * 
  * FUNCTIONS:
- *   - createWindow() - Creates main BrowserWindow with glassmorphism
- *   - initializeApp() - Ensures app directories exist
+ *   - createWindow() - Creates main BrowserWindow with platform-aware styling
+ *   - initializeApp() - Ensures app directories exist, loads config
  *   - setupIPC() - Registers all IPC handlers for renderer
  * 
  * IPC HANDLERS (renderer can invoke):
@@ -23,12 +24,14 @@
  *     - 'drives-resume' - Resume seeding
  *     - 'drives-remove' - Delete drive completely
  *     - 'drives-check-files' - Verify local file availability
+ *     - 'drive-get' - Get single drive by ID
  *   Utilities:
- *     - 'open-downloads' - Open downloads folder in Finder
- *     - 'open-file' - Open specific file in default app
- *     - 'show-file-in-folder' - Show file in Finder/Explorer
- *     - 'drive-get' - Get drive info by ID
+ *     - 'open-downloads' - Open downloads folder in Finder/Explorer
+ *     - 'open-file' - Open file in default application
+ *     - 'show-file-in-folder' - Reveal file in Finder/Explorer
  *     - 'get-files-stats' - Get file/folder stats with folder expansion
+ *     - 'get-debug' - Get current debug state
+ *     - 'set-debug' - Set debug state (persists to config)
  * 
  * IPC EVENTS SENT (to renderer):
  *   - 'peer-connected' - Peer joined (upload) or download starting
@@ -37,17 +40,24 @@
  *   - 'upload-complete' - Transfer finished
  *   - 'files-downloaded' - Download complete with file list
  *   - 'drives-updated' - Drive added/removed/changed
+ *   - 'download-peer-disconnected' - Sender went offline during download
  * 
  * EXTERNAL CALLS:
  *   - lib/hyperdrive-manager.js (manager singleton) - 🔒 SACRED
  *   - lib/drive-manager.js (driveManager singleton) - Single source of truth
  *   - lib/downloader.js (downloadFromDrive)
  *   - lib/file-utils.js (formatBytes, formatSpeed)
+ *   - lib/logger.js (createLogger, loadConfig, setDebug)
  * 
  * KEY STATE:
  *   - mainWindow - BrowserWindow instance
  *   - APP_DATA_DIR - ~/peardrop
  *   - DOWNLOADS_DIR - ~/peardrop/downloads
+ * 
+ * PLATFORM SUPPORT:
+ *   - macOS: Full glassmorphism, traffic lights, vibrancy
+ *   - Windows: Standard title bar, solid background
+ *   - Linux: Standard title bar, solid background
  */
 
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
@@ -64,6 +74,14 @@ const { downloadFromDrive } = require('./lib/downloader');
 const { manager: driveManager, DriveState } = require('./lib/drive-manager');
 // Utilities
 const { formatBytes, formatSpeed } = require('./lib/file-utils');
+// Debug logging
+const { createLogger, loadConfig: loadDebugConfig, setDebug, isDebugEnabled } = require('./lib/logger');
+const log = createLogger('PearDrop');
+
+// Platform detection
+const isMac = process.platform === 'darwin';
+const isWin = process.platform === 'win32';
+const isLinux = process.platform === 'linux';
 
 let mainWindow;
 
@@ -76,29 +94,46 @@ const DOWNLOADS_DIR = join(APP_DATA_DIR, 'downloads');
 // ============================================================================
 
 function createWindow() {
-    mainWindow = new BrowserWindow({
-        width: 320,
-        height: 440,
-        minWidth: 280,
-        minHeight: 400,
-        maxWidth: 400,
-        maxHeight: 520,
+    // Platform-specific window options
+    const windowOptions = {
+        width: 415,
+        height: 830,
+        minWidth: 450,
+        minHeight: 450,
+        maxWidth: 480,
+        maxHeight: 1000,
         resizable: true,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
             preload: join(__dirname, 'preload.js')
         },
-        titleBarStyle: 'hiddenInset',
-        trafficLightPosition: { x: 12, y: 12 },
-        vibrancy: 'under-window',
-        visualEffectState: 'active',
-        transparent: true,
-        backgroundColor: '#00000000',
         title: 'PearDrop',
         show: false
-    });
+    };
 
+    // macOS-specific: glassmorphism + hidden title bar
+    if (isMac) {
+        Object.assign(windowOptions, {
+            titleBarStyle: 'hiddenInset',
+            trafficLightPosition: { x: 12, y: 12 },
+            vibrancy: 'under-window',
+            visualEffectState: 'active',
+            transparent: true,
+            backgroundColor: '#00000000'
+        });
+    } else {
+        // Windows/Linux: standard title bar, solid background
+        Object.assign(windowOptions, {
+            backgroundColor: '#1a1a2e',
+            // Frame is default true on Windows/Linux
+            autoHideMenuBar: true  // Hide menu bar but allow Alt to show it
+        });
+    }
+
+    mainWindow = new BrowserWindow(windowOptions);
+
+    // Load main interface
     mainWindow.loadFile('index.html');
 
     mainWindow.once('ready-to-show', () => {
@@ -123,9 +158,14 @@ function createWindow() {
 
 async function initializeApp() {
     try {
+        // Load debug config first
+        const debugEnabled = loadDebugConfig();
+        log('Debug logging:', debugEnabled ? 'ENABLED' : 'DISABLED');
+        
+        // Ensure app directories exist
         await fs.mkdir(APP_DATA_DIR, { recursive: true });
         await fs.mkdir(DOWNLOADS_DIR, { recursive: true });
-        console.log('[PearDrop] App directories ready');
+        log('App directories ready');
         return true;
     } catch (error) {
         console.error('[PearDrop] Failed to initialize:', error);
@@ -205,6 +245,24 @@ function setupIPC() {
         }
     });
 
+    // Quick local-only duplicate check (fast, no network)
+    ipcMain.handle('hyperdrive-check-duplicate', async (event, { shareLink }) => {
+        const driveKey = shareLink.replace('peardrop://', '').toLowerCase();
+        const existingDrive = driveManager.getByKey(driveKey);
+        
+        if (existingDrive) {
+            const localAvailable = await driveManager.checkLocalAvailability(existingDrive.id);
+            return {
+                isDuplicate: true,
+                localStatus: localAvailable ? 'available' : 'missing',
+                existingDrive: existingDrive,
+                driveId: existingDrive.id
+            };
+        }
+        
+        return { isDuplicate: false };
+    });
+
     // Open a shared drive for download
     // Includes dedup check - returns existing entry if already downloaded
     // Pass forceOpen: true to skip dedup check (for re-downloads)
@@ -251,7 +309,8 @@ function setupIPC() {
                 files: result.files,
                 shareName: result.shareName,
                 totalBytes: result.totalBytes,
-                hasManifest: result.hasManifest
+                hasManifest: result.hasManifest,
+                peerConnected: result.peerConnected
             };
         } catch (error) {
             console.error('[PearDrop] Open failed:', error);
@@ -397,19 +456,29 @@ function setupIPC() {
         }
     });
 
-    // Open a specific file in its default app
+    // Open file in default application
     ipcMain.handle('open-file', async (event, { filePath }) => {
         try {
-            await shell.openPath(filePath);
+            if (!filePath) {
+                return { success: false, error: 'No file path provided' };
+            }
+            const result = await shell.openPath(filePath);
+            // shell.openPath returns empty string on success, error message on failure
+            if (result) {
+                return { success: false, error: result };
+            }
             return { success: true };
         } catch (error) {
             return { success: false, error: error.message };
         }
     });
 
-    // Show a file in Finder/Explorer
+    // Show file in Finder/Explorer
     ipcMain.handle('show-file-in-folder', async (event, { filePath }) => {
         try {
+            if (!filePath) {
+                return { success: false, error: 'No file path provided' };
+            }
             shell.showItemInFolder(filePath);
             return { success: true };
         } catch (error) {
@@ -421,6 +490,9 @@ function setupIPC() {
     ipcMain.handle('drive-get', async (event, { id }) => {
         try {
             const drive = driveManager.get(id);
+            if (!drive) {
+                return { success: false, error: 'Drive not found' };
+            }
             return { success: true, drive };
         } catch (error) {
             return { success: false, error: error.message };
@@ -530,6 +602,29 @@ function setupIPC() {
         } catch (error) {
             return { success: false, error: error.message };
         }
+    });
+
+    // ========================================================================
+    // Debug Logging Control
+    // ========================================================================
+
+    // Get current debug state
+    ipcMain.handle('get-debug', async () => {
+        return { enabled: isDebugEnabled() };
+    });
+
+    // Set debug state (persists to ~/peardrop/config.json)
+    ipcMain.handle('set-debug', async (event, { enabled }) => {
+        setDebug(enabled);
+        return { success: true, enabled: isDebugEnabled() };
+    });
+
+    // ========================================================================
+    // QR Code generation
+    // ========================================================================
+    ipcMain.handle('generate-qr', async (event, { text }) => {
+        const QRCode = require('qrcode');
+        return await QRCode.toDataURL(text, { width: 160, margin: 1, color: { dark: '#000000', light: '#ffffff' } });
     });
 
     // ========================================================================

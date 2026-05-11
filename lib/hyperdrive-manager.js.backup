@@ -5,31 +5,20 @@
  * EXPORTS:
  *   - HyperdriveManager (class) - Main manager class
  *   - manager (instance) - Singleton for app-wide use
- *   - DriveState (enum) - CREATING, ACTIVE, PAUSED, ERRORED
+ *   - DriveState (enum) - CREATING, ACTIVE, SEEDING, STOPPED, PURGED
  * 
  * FUNCTIONS:
- *   Core P2P:
- *     - init() - Load state, ensure directories, cleanup incomplete, resume active
+ *   Core:
+ *     - init() - Load manifest, ensure directories, cleanup incomplete, resume active
  *     - createDrive(files, options) - Create share with manifest, join swarm
  *     - openDrive(shareLink) - Connect to remote drive, read manifest
- *     - stopDrive(driveId, options) - Leave swarm, close drive, optionally delete
+ *     - stopDrive(driveId, options) - Leave swarm, close drive, purge storage
  *     - stopAll(options) - Stop all active drives
  *     - getStatus() - Return active/stopped drives and stats
- *     - cleanupManifest() - Remove deleted entries from manifest
- *   
- *   UI Interface (DriveManager compatibility):
- *     - addDriveEntry(data) - Add drive with UI-friendly data
- *     - removeDriveEntry(id, opts) - Remove drive entry + optional file/storage cleanup
- *     - updateDriveEntry(id, updates) - Update drive entry data
- *     - pauseDriveEntry(id) - Mark drive as paused (UI state)
- *     - resumeDriveEntry(id) - Mark drive as active (UI state)
- *     - getDriveEntry(id) - Get single drive by ID
- *     - getAllDriveEntries() - Get all drives as array
- *     - getDriveEntryByKey(key) - Find drive by hyperdrive key (dedup)
- *     - checkLocalAvailability(id) - Check if local files exist
+ *     - cleanupManifest() - Remove purged entries from manifest
  *   
  *   Resume (called by init):
- *     - _resumeActiveDrives() - Resume all ACTIVE drives from state
+ *     - _resumeActiveDrives() - Resume all ACTIVE drives from manifest
  *     - _resumeDrive(driveId, metadata) - Resume single drive, rejoin swarm
  *   
  *   File Operations (for UI):
@@ -45,7 +34,7 @@
  *   - 'upload-progress' - { driveId, peerId, percent, bytesTransferred... }
  *   - 'upload-complete' - { driveId, peerId, totalBytes, duration }
  *   - 'drive-created' - { driveId, shareLink, metadata }
- *   - 'drive-stopped' - { driveId, deleted }
+ *   - 'drive-stopped' - { driveId, purged }
  * 
  * EXTERNAL CALLS:
  *   - Corestore, Hyperdrive, Hyperswarm (holepunch P2P stack)
@@ -57,7 +46,7 @@
  * 
  * KEY CONSTANTS:
  *   - DRIVE_MANIFEST_PATH - '/.peardrop.json' (in-drive metadata)
- *   - DRIVES_STATE_FILE - ~/peardrop/drives-state.json (local tracking)
+ *   - DRIVES_MANIFEST_FILE - ~/peardrop/drives-manifest.json (local tracking)
  *   - PEARDROP_DIR - ~/peardrop
  *   - DRIVES_DIR - ~/peardrop/drives
  */
@@ -88,18 +77,17 @@ const DRIVE_MANIFEST_MAX_FILES = 1000      // Max files to list
 // Storage paths
 const PEARDROP_DIR = path.join(os.homedir(), 'peardrop')
 const DRIVES_DIR = path.join(PEARDROP_DIR, 'drives')
-const DRIVES_STATE_FILE = path.join(PEARDROP_DIR, 'drives-state.json')
+const DRIVES_MANIFEST_FILE = path.join(PEARDROP_DIR, 'drives-manifest.json')
 
 /**
  * Drive states for tracking lifecycle
  */
 const DriveState = {
-  CREATING: 'creating',  // Temporary during creation
-  ACTIVE: 'active',      // Sharing and available (DEFAULT)
-  SEEKING: 'seeking',    // Download attempting to find peers
-  PAUSED: 'paused',      // User explicitly paused, can resume
-  ERRORED: 'errored'     // Something wrong, needs fixing  
-  // Note: No PURGED state - drives are either active or completely deleted
+  CREATING: 'creating',
+  ACTIVE: 'active',      // Being shared
+  SEEDING: 'seeding',    // Available for download
+  STOPPED: 'stopped',    // No longer sharing
+  PURGED: 'purged'       // Data deleted
 }
 
 /**
@@ -110,7 +98,7 @@ class HyperdriveManager extends EventEmitter {
     super()
     
     this.drivesDir = options.drivesDir || DRIVES_DIR
-    this.manifestPath = options.manifestPath || DRIVES_STATE_FILE
+    this.manifestPath = options.manifestPath || DRIVES_MANIFEST_FILE
     
     // Active drives: Map<driveId, DriveSession>
     this.activeDrives = new Map()
@@ -347,7 +335,7 @@ class HyperdriveManager extends EventEmitter {
       if (options.ttlMs > 0) {
         session.expirationTimer = setTimeout(() => {
           console.log('[HyperdriveManager] Drive expired', { driveId })
-          this.stopDrive(driveId, { delete: true })
+          this.stopDrive(driveId, { purge: true })
         }, options.ttlMs)
       }
       
@@ -367,7 +355,7 @@ class HyperdriveManager extends EventEmitter {
     } catch (error) {
       // Cleanup on failure
       console.error('[HyperdriveManager] Failed to create drive', error)
-      metadata.state = DriveState.ERRORED
+      metadata.state = DriveState.STOPPED
       metadata.error = error.message
       await this._saveManifest()
       
@@ -383,9 +371,9 @@ class HyperdriveManager extends EventEmitter {
    * 
    * @param {string} driveId - Drive ID to stop
    * @param {Object} options
-   * @param {boolean} options.delete - Whether to completely remove drive (default: false)
+   * @param {boolean} options.purge - Whether to delete all data (default: true)
    */
-  async stopDrive(driveId, options = { delete: false }) {
+  async stopDrive(driveId, options = { purge: true }) {
     const session = this.activeDrives.get(driveId)
     
     if (!session) {
@@ -393,7 +381,7 @@ class HyperdriveManager extends EventEmitter {
       return
     }
     
-    console.log('[HyperdriveManager] Stopping drive', { driveId, delete: options.delete })
+    console.log('[HyperdriveManager] Stopping drive', { driveId, purge: options.purge })
     
     // Clear expiration timer
     if (session.expirationTimer) {
@@ -428,8 +416,8 @@ class HyperdriveManager extends EventEmitter {
       }
     }
     
-    // Delete storage directory if requested (manual cleanup)
-    if (options.delete && session.metadata?.storagePath) {
+    // Delete storage directory if purging (manual cleanup - more reliable than drive.purge())
+    if (options.purge && session.metadata?.storagePath) {
       try {
         await fs.rm(session.metadata.storagePath, { recursive: true, force: true })
         console.log('[HyperdriveManager] Storage deleted', { 
@@ -443,14 +431,10 @@ class HyperdriveManager extends EventEmitter {
     // Update manifest
     const metadata = this.manifest.drives[driveId]
     if (metadata) {
-      if (options.delete) {
-        // Drive will be completely removed - delete from manifest
-        delete this.manifest.drives[driveId]
+      metadata.state = options.purge ? DriveState.PURGED : DriveState.STOPPED
+      metadata.stoppedAt = Date.now()
+      if (options.purge) {
         this.manifest.stats.totalPurged++
-      } else {
-        // Just pause the drive
-        metadata.state = DriveState.PAUSED
-        metadata.stoppedAt = Date.now()
       }
       await this._saveManifest()
     }
@@ -458,7 +442,7 @@ class HyperdriveManager extends EventEmitter {
     // Remove from active drives
     this.activeDrives.delete(driveId)
     
-    this.emit('drive-stopped', { driveId, deleted: options.delete })
+    this.emit('drive-stopped', { driveId, purged: options.purge })
     
     console.log('[HyperdriveManager] Drive fully stopped', { driveId })
   }
@@ -479,22 +463,6 @@ class HyperdriveManager extends EventEmitter {
     
     const driveId = `recv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const drivePath = path.join(this.drivesDir, driveId)
-    
-    // Immediately persist to drives-state.json (before any network activity)
-    await this.addDriveEntry({
-      driveId: driveId,
-      key: key,
-      discoveryKey: null, // Will be set after drive.ready()
-      state: 'seeking',
-      shareLink: shareLink,
-      isUpload: false,
-      files: [],
-      totalBytes: 0,
-      storagePath: drivePath,
-      createdAt: Date.now(),
-      name: 'Seeking peers...', // Temporary name until we get real data
-      lastAttempt: Date.now()
-    })
     
     console.log('[HyperdriveManager] Opening remote drive', { driveId, key: key.slice(0, 16) + '...' })
     
@@ -532,7 +500,7 @@ class HyperdriveManager extends EventEmitter {
       })
     })
     
-    // Join swarm for persistent peer discovery (no timeout)
+    const done = drive.findingPeers()
     const topic = swarm.join(drive.discoveryKey)
     
     // Log DHT lookup progress
@@ -541,7 +509,7 @@ class HyperdriveManager extends EventEmitter {
     })
     
     await swarm.flush()
-    // REMOVED: done() - Keep seeking peers indefinitely
+    done()
     
     console.log('[HyperdriveManager] Swarm flushed, waiting for drive update...', { driveId, peerConnected })
     
@@ -605,19 +573,18 @@ class HyperdriveManager extends EventEmitter {
     // Connection successful - remove from pending
     this.pendingConnections.delete(driveId)
     
-    // Only read drive data when we have verified peer connections
+    if (!peerConnected) {
+      console.warn('[HyperdriveManager] Drive updated but no peer connection logged - may be stale data')
+    }
+    
+    // Try to read PearDrop manifest first (fast, has all metadata)
     let files = []
     let manifest = null
     let totalBytes = 0
     let shareName = null
     
-    if (!peerConnected) {
-      console.log('[HyperdriveManager] No peer connected yet - drive remains in seeking state')
-      // Don't read any data - keep drive in seeking state
-    } else {
-      // We have peer connection - safe to read drive data
-      try {
-        const manifestData = await drive.get(DRIVE_MANIFEST_PATH)
+    try {
+      const manifestData = await drive.get(DRIVE_MANIFEST_PATH)
       if (manifestData && manifestData.length <= DRIVE_MANIFEST_MAX_SIZE) {
         manifest = JSON.parse(manifestData.toString())
         
@@ -644,25 +611,24 @@ class HyperdriveManager extends EventEmitter {
           })
         }
       }
-      } catch (err) {
-        console.log('[HyperdriveManager] No manifest, falling back to listing', err.message)
+    } catch (err) {
+      console.log('[HyperdriveManager] No manifest, falling back to listing', err.message)
+    }
+    
+    // Fallback: list files from drive directly
+    if (files.length === 0) {
+      for await (const entry of drive.list('/')) {
+        // Skip manifest file
+        if (entry.key === DRIVE_MANIFEST_PATH) continue
+        
+        files.push({
+          name: entry.key,
+          displayName: path.basename(entry.key),
+          size: entry.value?.blob?.byteLength || 0
+        })
       }
-      
-      // Fallback: list files from drive directly (only when peer connected)
-      if (files.length === 0) {
-        for await (const entry of drive.list('/')) {
-          // Skip manifest file
-          if (entry.key === DRIVE_MANIFEST_PATH) continue
-          
-          files.push({
-            name: entry.key,
-            displayName: path.basename(entry.key),
-            size: entry.value?.blob?.byteLength || 0
-          })
-        }
-        totalBytes = files.reduce((sum, f) => sum + f.size, 0)
-      }
-    } // End peer connected check
+      totalBytes = files.reduce((sum, f) => sum + f.size, 0)
+    }
     
     const session = {
       driveId,
@@ -678,24 +644,6 @@ class HyperdriveManager extends EventEmitter {
       createdAt: Date.now()
     }
     this.activeDrives.set(driveId, session)
-    
-    // Update the persisted drive entry with real data now that we have successful connection
-    if (peerConnected) {
-      await this.addDriveEntry({
-        driveId: driveId,
-        key: drive.key.toString('hex'), // Use canonical drive key format
-        discoveryKey: drive.discoveryKey.toString('hex'),
-        state: 'active',
-        shareLink: shareLink,
-        isUpload: false,
-        files: files,
-        totalBytes: totalBytes,
-        storagePath: path.join(this.drivesDir, driveId),
-        createdAt: Date.now(),
-        name: shareName || 'Remote Share',
-        lastAttempt: Date.now()
-      })
-    }
     
     console.log('[HyperdriveManager] Remote drive opened', { 
       driveId, 
@@ -783,220 +731,9 @@ class HyperdriveManager extends EventEmitter {
        * Close this receiving session and cleanup
        */
       close: async () => {
-        await this.stopDrive(driveId, { delete: true })
+        await this.stopDrive(driveId, { purge: true })
       }
     }
-  }
-
-  // ============================================================================
-  // UI INTERFACE (DriveManager compatibility - single source of truth)
-  // ============================================================================
-
-  /**
-   * Add a drive to the manifest with UI-friendly data
-   * Merges P2P data with presentation data for frontend consumption
-   */
-  async addDriveEntry(driveData) {
-    if (!this.initialized) await this.init()
-    
-    const driveId = driveData.id || driveData.driveId
-    
-    // Compute derived UI data
-    const displayName = this._computeDisplayName(driveData.files || [])
-    const shareLink = driveData.shareLink || `peardrop://${driveData.key}`
-    
-    const entry = {
-      // Core P2P data
-      driveId,
-      key: driveData.key,
-      discoveryKey: driveData.discoveryKey,
-      state: driveData.state || DriveState.ACTIVE,
-      
-      // File system data
-      files: driveData.files || [],
-      totalBytes: driveData.totalBytes || 0,
-      localPath: driveData.localPath || null,
-      storagePath: driveData.storagePath || path.join(this.drivesDir, driveId),
-      
-      // UI-friendly cached data
-      name: displayName,
-      shareLink,
-      
-      // Transfer metadata
-      createdAt: driveData.createdAt || Date.now(),
-      isUpload: driveData.isUpload || false,
-      
-      // Stats
-      stats: {
-        uploaded: 0,
-        downloaded: 0,
-        peers: 0,
-        ...driveData.stats
-      }
-    }
-    
-    this.manifest.drives[driveId] = entry
-    await this._saveManifest()
-    
-    console.log('[HyperdriveManager] Drive entry added', { id: driveId, name: entry.name })
-    return entry
-  }
-
-  /**
-   * Remove drive entry and optionally delete files/storage
-   */
-  async removeDriveEntry(id, opts = {}) {
-    if (!this.initialized) await this.init()
-    
-    const drive = this.manifest.drives[id]
-    if (!drive) {
-      console.log('[HyperdriveManager] Remove entry: not found', { id })
-      return false
-    }
-    
-    console.log('[HyperdriveManager] Removing drive entry', { 
-      id, 
-      name: drive.name,
-      deleteFiles: opts.deleteFiles, 
-      deleteStorage: opts.deleteStorage 
-    })
-    
-    // Delete hyperdrive storage directory
-    if (opts.deleteStorage && drive.storagePath) {
-      try {
-        await fs.rm(drive.storagePath, { recursive: true, force: true })
-        console.log('[HyperdriveManager] Storage deleted', { path: drive.storagePath })
-      } catch (err) {
-        console.warn('[HyperdriveManager] Storage delete failed:', err.message)
-      }
-    }
-    
-    // Delete local files
-    if (opts.deleteFiles && drive.files) {
-      for (const file of drive.files) {
-        if (file.path) {
-          try {
-            await fs.unlink(file.path)
-            console.log('[HyperdriveManager] File deleted', { path: file.path })
-          } catch (err) {
-            console.warn('[HyperdriveManager] File delete failed:', err.message)
-          }
-        }
-      }
-    }
-    
-    // Remove from manifest
-    delete this.manifest.drives[id]
-    await this._saveManifest()
-    
-    console.log('[HyperdriveManager] Drive entry removed completely', { id })
-    return true
-  }
-
-  /**
-   * Update drive entry data
-   */
-  async updateDriveEntry(id, updates) {
-    if (!this.initialized) await this.init()
-    
-    const drive = this.manifest.drives[id]
-    if (!drive) return null
-    
-    Object.assign(drive, updates)
-    
-    // Recompute derived data if files changed
-    if (updates.files) {
-      drive.name = this._computeDisplayName(updates.files)
-      drive.totalBytes = updates.files.reduce((sum, f) => sum + (f.size || 0), 0)
-    }
-    
-    await this._saveManifest()
-    return drive
-  }
-
-  /**
-   * Pause drive (UI state only - actual P2P handled separately)
-   */
-  async pauseDriveEntry(id) {
-    const drive = this.manifest.drives[id]
-    if (!drive) return null
-    
-    drive.uiState = 'paused'
-    drive.pausedAt = Date.now()
-    await this._saveManifest()
-    
-    console.log('[HyperdriveManager] Drive entry paused', { id, name: drive.name })
-    return drive
-  }
-
-  /**
-   * Resume drive (UI state only - actual P2P handled separately)
-   */
-  async resumeDriveEntry(id) {
-    const drive = this.manifest.drives[id]
-    if (!drive) return null
-    
-    drive.state = DriveState.ACTIVE
-    delete drive.pausedAt
-    await this._saveManifest()
-    
-    console.log('[HyperdriveManager] Drive entry resumed', { id, name: drive.name })
-    return drive
-  }
-
-  /**
-   * Get single drive by ID (UI interface)
-   */
-  getDriveEntry(id) {
-    return this.manifest.drives[id] || null
-  }
-
-  /**
-   * Get all drives as array (UI interface) 
-   */
-  getAllDriveEntries() {
-    return Object.values(this.manifest.drives)
-  }
-
-  /**
-   * Get active drives (UI interface)
-   */
-  getActiveDriveEntries() {
-    return this.getAllDriveEntries().filter(d => d.state === DriveState.ACTIVE)
-  }
-
-  /**
-   * Find drive by hyperdrive key (for deduplication)
-   */
-  getDriveEntryByKey(key) {
-    if (!key) return null
-    const normalizedKey = key.toLowerCase()
-    return this.getAllDriveEntries().find(d => d.key?.toLowerCase() === normalizedKey) || null
-  }
-
-  /**
-   * Check if local files still exist for a drive
-   */
-  async checkLocalAvailability(id) {
-    const drive = this.manifest.drives[id]
-    if (!drive || !drive.files || drive.files.length === 0) return false
-    
-    // Check first file exists
-    try {
-      await fs.access(drive.files[0].path)
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Compute display name from file list
-   */
-  _computeDisplayName(files) {
-    if (!files || files.length === 0) return 'Empty share'
-    if (files.length === 1) return files[0].name
-    return `${files.length} files`
   }
 
   // ============================================================================
@@ -1201,7 +938,7 @@ class HyperdriveManager extends EventEmitter {
     }
     
     for (const [driveId, metadata] of Object.entries(this.manifest.drives)) {
-      if (metadata.state === DriveState.PAUSED || metadata.state === DriveState.ERRORED) {
+      if (metadata.state === DriveState.STOPPED || metadata.state === DriveState.PURGED) {
         stopped.push({
           driveId,
           state: metadata.state,
@@ -1222,7 +959,7 @@ class HyperdriveManager extends EventEmitter {
   /**
    * Stop all active drives
    */
-  async stopAll(options = { delete: false }) {
+  async stopAll(options = { purge: true }) {
     console.log('[HyperdriveManager] Stopping all drives')
     
     const driveIds = Array.from(this.activeDrives.keys())
@@ -1234,13 +971,13 @@ class HyperdriveManager extends EventEmitter {
   }
 
   /**
-   * Cleanup all deleted drives from manifest (for maintenance)
+   * Cleanup all purged drives from manifest (for maintenance)
    */
   async cleanupManifest() {
     const toRemove = []
     
     for (const [driveId, metadata] of Object.entries(this.manifest.drives)) {
-      if (false) { // No more PURGED state - drives are deleted immediately
+      if (metadata.state === DriveState.PURGED) {
         // Verify storage is actually deleted
         try {
           await fs.access(metadata.storagePath)
@@ -1318,7 +1055,7 @@ class HyperdriveManager extends EventEmitter {
 
   async _cleanupOrphanedDrives() {
     // Only cleanup drives stuck in CREATING state (incomplete creation)
-    // ACTIVE drives should be resumed, not deleted
+    // ACTIVE drives should be resumed, not purged
     for (const [driveId, metadata] of Object.entries(this.manifest.drives)) {
       if (metadata.state === DriveState.CREATING) {
         console.log('[HyperdriveManager] Cleaning up incomplete drive', { driveId })
@@ -1329,8 +1066,9 @@ class HyperdriveManager extends EventEmitter {
           // Ignore errors
         }
         
-        // Delete incomplete drives immediately
-        delete this.manifest.drives[driveId]
+        metadata.state = DriveState.PURGED
+        metadata.stoppedAt = Date.now()
+        metadata.error = 'Incomplete on startup'
         this.manifest.stats.totalPurged++
       }
     }
@@ -1344,7 +1082,7 @@ class HyperdriveManager extends EventEmitter {
    */
   async _resumeActiveDrives() {
     const toResume = Object.entries(this.manifest.drives)
-      .filter(([_, meta]) => meta.state === DriveState.ACTIVE || meta.state === DriveState.SEEKING)
+      .filter(([_, meta]) => meta.state === DriveState.ACTIVE)
     
     if (toResume.length === 0) return
     
@@ -1355,8 +1093,8 @@ class HyperdriveManager extends EventEmitter {
         await this._resumeDrive(driveId, metadata)
       } catch (err) {
         console.error('[HyperdriveManager] Failed to resume drive', { driveId, error: err.message })
-        // Mark as errored - user can retry or delete manually
-        metadata.state = DriveState.ERRORED
+        // Mark as stopped but don't purge - user can retry or clear manually
+        metadata.state = DriveState.STOPPED
         metadata.stoppedAt = Date.now()
         metadata.error = `Resume failed: ${err.message}`
       }
@@ -1369,19 +1107,7 @@ class HyperdriveManager extends EventEmitter {
    * Resume a single drive from stored metadata
    */
   async _resumeDrive(driveId, metadata) {
-    console.log('[HyperdriveManager] Resuming drive', { driveId, state: metadata.state })
-    
-    // For 'seeking' state drives (downloads), we need to restart peer discovery
-    if (metadata.state === DriveState.SEEKING && metadata.shareLink) {
-      console.log('[HyperdriveManager] Resuming download in seeking state', { driveId })
-      try {
-        await this.openDrive(metadata.shareLink)
-        return
-      } catch (error) {
-        console.error('[HyperdriveManager] Failed to resume seeking download', { driveId, error: error.message })
-        throw error
-      }
-    }
+    console.log('[HyperdriveManager] Resuming drive', { driveId })
     
     const drivePath = metadata.storagePath
     
@@ -1392,11 +1118,11 @@ class HyperdriveManager extends EventEmitter {
       throw new Error('Storage directory missing')
     }
     
-    // Re-open the corestore and drive with stored key
+    // Re-open the corestore and drive
     const store = new Corestore(drivePath)
     await store.ready()
     
-    const drive = new Hyperdrive(store, Buffer.from(metadata.key, 'hex'))
+    const drive = new Hyperdrive(store)
     await drive.ready()
     
     // Verify key matches
@@ -1427,7 +1153,7 @@ class HyperdriveManager extends EventEmitter {
       })
     })
     
-    // Join swarm for persistent peer discovery (no timeout)
+    const done = drive.findingPeers()
     const topic = swarm.join(drive.discoveryKey)
     
     topic.flushed().then(() => {
@@ -1437,26 +1163,22 @@ class HyperdriveManager extends EventEmitter {
       })
     })
     
-    // REMOVED: swarm.flush().then(done, done) - Keep seeking peers indefinitely
+    swarm.flush().then(done, done)
     
     // Track uploads
     tracker.trackUploads(driveId, drive, metadata.totalBytes)
     
-    // Create unique handlers to avoid duplicate listeners
-    const progressHandler = (data) => {
+    tracker.on('progress', (data) => {
       if (data.driveId === driveId) {
         this.emit('upload-progress', data)
       }
-    }
+    })
     
-    const completeHandler = (data) => {
+    tracker.on('complete', (data) => {
       if (data.driveId === driveId) {
         this.emit('upload-complete', data)
       }
-    }
-    
-    tracker.on('progress', progressHandler)
-    tracker.on('complete', completeHandler)
+    })
     
     // Store session
     const session = {
@@ -1467,9 +1189,7 @@ class HyperdriveManager extends EventEmitter {
       metadata,
       totalBytes: metadata.totalBytes,
       createdAt: metadata.createdAt,
-      resumedAt: Date.now(),
-      progressHandler,
-      completeHandler
+      resumedAt: Date.now()
     }
     this.activeDrives.set(driveId, session)
     

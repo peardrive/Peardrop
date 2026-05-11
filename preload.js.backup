@@ -13,7 +13,7 @@
  *       - hyperdriveAbort(data) - Abort pending connection
  *       - hyperdriveStatus() - Get drive stats
  *     
- *     HyperdriveManager (single source of truth):
+ *     DriveManager (single source of truth):
  *       - drivesList() - Get all drives
  *       - drivesPause(data) - Pause seeding (keep data)
  *       - drivesResume(data) - Resume seeding
@@ -58,7 +58,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     hyperdriveStatus: () => ipcRenderer.invoke('hyperdrive-status'),
     
     // ========================================================================
-    // HyperdriveManager - Single source of truth for Shares tab
+    // DriveManager - Single source of truth for Shares tab
     // ========================================================================
     drivesList: () => ipcRenderer.invoke('drives-list'),
     drivesPause: (data) => ipcRenderer.invoke('drives-pause', data),

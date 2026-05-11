@@ -82,7 +82,7 @@ let activeFiles = [];           // Files selected for sharing
 let currentShareLink = null;    // Active share link
 let driveActions = null;        // DriveActions instance (set in init)
 let currentDriveId = null;      // Active drive ID
-let drives = [];                // All drives from HyperdriveManager
+let drives = [];                // All drives from DriveManager
 let driveItems = new Map();     // driveId -> DriveItem instance
 let scrollList = null;          // ScrollList instance
 
@@ -134,20 +134,12 @@ function init() {
                     return;
                 }
                 
-                console.log('[DEBUG] DriveActions - calling action:', event.action, 'for drive:', event.data.id);
-                
                 const result = await driveActions.handle(event.action, event.data);
-                
-                console.log('[DEBUG] DriveActions - result:', {
-                    action: event.action,
-                    driveId: event.data.id,
-                    success: result.success,
-                    error: result.error
-                });
-                
-                // Update UI based on action result (remove action now handled by drives-updated event)
+                // Update UI based on action result
                 if (result.success) {
-                    if (event.action === 'pause') {
+                    if (event.action === 'remove') {
+                        removeDriveFromList(event.data.id);
+                    } else if (event.action === 'pause') {
                         updateDriveInList({ id: event.data.id, status: 'paused' });
                     } else if (event.action === 'resume') {
                         const status = event.data.type === 'share' ? 'sharing' : 'downloading';
@@ -660,44 +652,9 @@ function updateDriveInList(drive) {
 }
 
 function removeDriveFromList(driveId) {
-    console.log('[DEBUG] removeDriveFromList called:', {
-        driveId,
-        driveItemExists: driveItems.has(driveId),
-        scrollListHasSlot: scrollList._slots?.has(driveId) || 'unknown',
-        drivesArrayLength: drives.length,
-        driveInArray: drives.some(d => d.id === driveId)
-    });
-    
-    // Step 1: Remove from driveItems Map
-    const hadDriveItem = driveItems.has(driveId);
     driveItems.delete(driveId);
-    console.log('[DEBUG] After driveItems.delete():', {
-        hadDriveItem,
-        nowHas: driveItems.has(driveId)
-    });
-    
-    // Step 2: Remove from ScrollList
-    const hadScrollListSlot = scrollList._slots?.has(driveId);
-    console.log('[DEBUG] Before scrollList.removeItem():', {
-        hadScrollListSlot,
-        scrollListSlotCount: scrollList._slots?.size || 'unknown'
-    });
-    
-    const scrollListResult = scrollList.removeItem(driveId);
-    console.log('[DEBUG] After scrollList.removeItem():', {
-        result: scrollListResult,
-        nowHasSlot: scrollList._slots?.has(driveId) || 'unknown',
-        scrollListSlotCount: scrollList._slots?.size || 'unknown'
-    });
-    
-    // Step 3: Remove from drives array
-    const originalLength = drives.length;
+    scrollList.removeItem(driveId);
     drives = drives.filter(d => d.id !== driveId);
-    console.log('[DEBUG] After drives array filter:', {
-        originalLength,
-        newLength: drives.length,
-        removed: originalLength - drives.length
-    });
 }
 
 async function loadDrives() {
@@ -720,7 +677,7 @@ function normalizeDrive(drive) {
         size: drive.totalBytes || drive.size || 0,
         fileCount: drive.fileCount || drive.files?.length || 1,
         files: drive.files || [],
-        status: drive.status || 'sharing',
+        status: drive.status || 'inactive',
         progress: drive.progress,
         speed: drive.speed,
         peers: drive.peers || 0,
@@ -807,42 +764,9 @@ function bindIPC() {
         }
     });
     
-    // Drives updated (from HyperdriveManager)
+    // Drives updated (from DriveManager)
     window.electronAPI.onDrivesUpdated?.((event, data) => {
-        if (data.action === 'loaded') {
-            // Complete drives list loaded (e.g., after migration or startup)
-            console.log('[PearDrop] Drives loaded, refreshing list:', data.drives?.length || 0);
-            if (data.drives) {
-                for (const drive of data.drives) {
-                    const normalized = normalizeDrive(drive);
-                    if (driveItems.has(normalized.id)) {
-                        updateDriveInList(normalized);
-                    } else {
-                        addDriveToList(normalized);
-                    }
-                }
-            }
-        } else if (data.action === 'removed' && data.id) {
-            // Drive was deleted from backend
-            console.log('[DEBUG] onDrivesUpdated - removal event received:', {
-                action: data.action,
-                id: data.id,
-                driveItemsSize: driveItems.size,
-                scrollListSize: scrollList._slots?.size || 'unknown',
-                driveItemExists: driveItems.has(data.id),
-                scrollListHasSlot: scrollList._slots?.has(data.id) || 'unknown'
-            });
-            
-            removeDriveFromList(data.id);
-            
-            console.log('[DEBUG] onDrivesUpdated - after removal:', {
-                driveItemsSize: driveItems.size,
-                scrollListSize: scrollList._slots?.size || 'unknown',
-                driveItemExists: driveItems.has(data.id),
-                scrollListHasSlot: scrollList._slots?.has(data.id) || 'unknown'
-            });
-        } else if (data.drives) {
-            // Legacy format or individual drive updates
+        if (data.drives) {
             for (const drive of data.drives) {
                 const normalized = normalizeDrive(drive);
                 if (driveItems.has(normalized.id)) {
@@ -1144,7 +1068,7 @@ async function clearCompletedTransfers() {
         }
         // Everything else: complete, inactive, error, paused, disconnected
         return d.status === 'complete' || 
-               d.status === 'sharing' || 
+               d.status === 'inactive' || 
                d.status === 'error' ||
                d.status === 'paused' ||
                (d.type === 'download' && d.progress >= 1) ||
@@ -1239,9 +1163,10 @@ const STATUS_PRIORITY = {
     'downloading': 1,
     'connecting': 2,
     'sharing': 3,
-    'complete': 4,
-    'paused': 5,
-    'error': 6
+    'inactive': 4,
+    'complete': 5,
+    'paused': 6,
+    'error': 7
 };
 
 function getFileExtension(filename) {

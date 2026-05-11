@@ -140,7 +140,7 @@ async function cmdShare(filePath) {
     // Keep alive
     process.on('SIGINT', async () => {
         console.log('\nStopping...');
-        await manager.stopAll({ purge: true });
+        await manager.stopAll({ delete: true });
         process.exit(0);
     });
     
@@ -187,7 +187,7 @@ async function cmdServe() {
     // Handle graceful shutdown - stop but don't purge so shares can resume
     process.on('SIGINT', async () => {
         console.log('\nStopping server (shares will resume on next serve)...');
-        await manager.stopAll({ purge: false });
+        await manager.stopAll({ delete: false });
         process.exit(0);
     });
     
@@ -262,10 +262,10 @@ async function cmdStop(driveId) {
     await manager.init();
     
     if (driveId) {
-        await manager.stopDrive(driveId, { purge: true });
+        await manager.stopDrive(driveId, { delete: true });
         console.log(`Stopped: ${driveId}`);
     } else {
-        await manager.stopAll({ purge: true });
+        await manager.stopAll({ delete: true });
         console.log('All shares stopped.');
     }
 }
@@ -278,7 +278,7 @@ async function cmdStatus() {
     console.log('---------------');
     console.log(`Active shares: ${status.active.length}`);
     console.log(`Total created: ${status.stats.totalCreated}`);
-    console.log(`Total purged: ${status.stats.totalPurged}`);
+    console.log(`Total deleted: ${status.stats.totalPurged}`);
     console.log(`Bytes shared: ${formatBytes(status.stats.totalBytesShared)}`);
 }
 

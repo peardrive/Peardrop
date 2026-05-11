@@ -1,5 +1,55 @@
 # PearDrop Changelog
 
+## v0.19.0 (2026-05-10) - P2P Connectivity Overhaul 🔧
+
+**Major P2P reliability improvements and status system cleanup**
+
+### What Changed
+- **🔄 Persistent Peer Discovery**
+  - Downloads now seek peers indefinitely (like BitTorrent) instead of timing out
+  - Removed premature `done()` calls that were stopping peer discovery
+  - Downloads survive app restarts and continue seeking automatically
+
+- **💾 Immediate Download Persistence** 
+  - Downloads immediately saved to drives-state.json in 'seeking' state
+  - No more lost downloads when app crashes before completion
+  - Full download state preserved across restarts
+
+- **🚫 Duplicate Prevention**
+  - Fixed deduplication logic to recognize existing downloads by key
+  - Downloads properly updated with real data after successful peer connection
+  - Prevents multiple downloads of the same content
+
+- **♻️ Auto-Resume on Restart**
+  - Added 'seeking' to DriveState constants
+  - Downloads in seeking state automatically resume peer discovery on app launch
+  - Upload shares also resume normally after restart
+
+- **🧹 Status System Cleanup**
+  - **REMOVED:** Misleading "inactive" status that appeared after arbitrary timer
+  - **REMOVED:** Timer-based status switching that didn't reflect real P2P state  
+  - Default status now "sharing" (ready to share) instead of "inactive"
+  - Status changes only based on real peer events, not timers
+
+### Technical Details
+- Fixed `openDrive()` to never stop peer discovery with persistent swarm joining
+- Added immediate `addDriveEntry()` call before any network activity
+- Enhanced `_resumeDrive()` to handle seeking downloads via `openDrive()` restart
+- Updated STATUS_CONFIG and removed all inactive status references
+- Modified drive resumption to include both active and seeking drives
+
+### Bug Fixes
+- **🔧 Fixed drive resumption after restart** - Resumed drives now open with correct stored key instead of generating new keys
+- **🎯 Fixed drive deletion UI sync** - Drive removal now properly updates GUI immediately via event-driven architecture  
+- **🚫 Removed misleading "inactive" status** - Eliminated timer-based status that didn't reflect real P2P connection state
+
+### For Developers
+- Enhanced `_resumeDrive()` to open drives with stored key: `new Hyperdrive(store, Buffer.from(metadata.key, 'hex'))`
+- Fixed IPC event flow: backend always sends `drives-updated` event regardless of manifest state
+- Pure event-driven deletion: removed immediate UI updates, relies only on backend confirmation events
+- Comprehensive debugging added throughout deletion flow (can be removed in production)
+- Inactive status completely removed from DriveItem and renderer components
+
 ## v0.18.0 (2026-03-10) - V2 UI Migration 🎉
 
 **Major UI overhaul: Integrated ScrollList + DriveItem architecture**

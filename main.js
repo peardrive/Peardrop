@@ -18,7 +18,7 @@
  *     - 'hyperdrive-abort' - Abort pending connection(s)
  *     - 'hyperdrive-download' - Download files from opened drive
  *     - 'hyperdrive-status' - Get active/stopped drives stats
- *   DriveManager:
+ *   HyperdriveManager (UI Interface):
  *     - 'drives-list' - Get all tracked drives
  *     - 'drives-pause' - Pause seeding (keep data)
  *     - 'drives-resume' - Resume seeding
@@ -43,8 +43,7 @@
  *   - 'download-peer-disconnected' - Sender went offline during download
  * 
  * EXTERNAL CALLS:
- *   - lib/hyperdrive-manager.js (manager singleton) - 🔒 SACRED
- *   - lib/drive-manager.js (driveManager singleton) - Single source of truth
+ *   - lib/hyperdrive-manager.js (manager singleton) - Single source of truth for drives
  *   - lib/downloader.js (downloadFromDrive)
  *   - lib/file-utils.js (formatBytes, formatSpeed)
  *   - lib/logger.js (createLogger, loadConfig, setDebug)
@@ -66,17 +65,24 @@ const { join } = path;
 const fs = require('fs').promises;
 const os = require('os');
 
-// Hyperdrive manager for file sharing (🔒 SACRED - don't modify)
-const { manager: hyperdriveManager } = require('./lib/hyperdrive-manager');
+// Hyperdrive manager for file sharing (🔒 SACRED core + UI interface)
+const { manager: hyperdriveManager, DriveState } = require('./lib/hyperdrive-manager');
 // Download orchestration (✅ SAFE to modify)
 const { downloadFromDrive } = require('./lib/downloader');
-// Drive manager - single source of truth for all drives (✅ SAFE to modify)
-const { manager: driveManager, DriveState } = require('./lib/drive-manager');
 // Utilities
 const { formatBytes, formatSpeed } = require('./lib/file-utils');
 // Debug logging
 const { createLogger, loadConfig: loadDebugConfig, setDebug, isDebugEnabled } = require('./lib/logger');
 const log = createLogger('PearDrop');
+
+// Migration tool (can be safely removed after migration completes)
+let migrationTool = null;
+try {
+    migrationTool = require('./lib/migration');
+} catch (error) {
+    // Migration tool not found - this is fine, continue normally
+    console.log('[PearDrop] Migration tool not available, continuing with normal startup');
+}
 
 // Platform detection
 const isMac = process.platform === 'darwin';
@@ -196,8 +202,8 @@ function setupIPC() {
             const totalBytes = files.reduce((sum, f) => sum + (f.size || 0), 0);
             const shareName = options.name || (files.length === 1 ? files[0].name : `${files.length} files`);
             
-            // Add to DriveManager (single source of truth for Shares tab)
-            const driveEntry = await driveManager.add({
+            // Add to drives state (single source of truth for UI)
+            const driveEntry = await hyperdriveManager.addDriveEntry({
                 id: result.driveId,
                 key: result.key,
                 shareLink: result.shareLink,
@@ -235,9 +241,9 @@ function setupIPC() {
     });
 
     // Stop sharing a drive
-    ipcMain.handle('hyperdrive-stop', async (event, { driveId, purge = true }) => {
+    ipcMain.handle('hyperdrive-stop', async (event, { driveId, delete: deleteParam = false }) => {
         try {
-            await hyperdriveManager.stopDrive(driveId, { purge });
+            await hyperdriveManager.stopDrive(driveId, { delete: deleteParam });
             console.log('[PearDrop] Share stopped:', driveId);
             return { success: true };
         } catch (error) {
@@ -248,10 +254,10 @@ function setupIPC() {
     // Quick local-only duplicate check (fast, no network)
     ipcMain.handle('hyperdrive-check-duplicate', async (event, { shareLink }) => {
         const driveKey = shareLink.replace('peardrop://', '').toLowerCase();
-        const existingDrive = driveManager.getByKey(driveKey);
+        const existingDrive = hyperdriveManager.getDriveEntryByKey(driveKey);
         
         if (existingDrive) {
-            const localAvailable = await driveManager.checkLocalAvailability(existingDrive.id);
+            const localAvailable = await hyperdriveManager.checkLocalAvailability(existingDrive.id);
             return {
                 isDuplicate: true,
                 localStatus: localAvailable ? 'available' : 'missing',
@@ -274,11 +280,11 @@ function setupIPC() {
             // Extract key from peardrop:// link
             const driveKey = shareLink.replace('peardrop://', '').toLowerCase();
             if (driveKey && !forceOpen) {
-                const existingDrive = driveManager.getByKey(driveKey);
+                const existingDrive = hyperdriveManager.getDriveEntryByKey(driveKey);
                 
                 if (existingDrive) {
                     // Check if local files still exist
-                    const localAvailable = await driveManager.checkLocalAvailability(existingDrive.id);
+                    const localAvailable = await hyperdriveManager.checkLocalAvailability(existingDrive.id);
                     
                     console.log('[PearDrop] Duplicate detected:', {
                         driveKey: driveKey.slice(0, 12) + '...',
@@ -392,8 +398,8 @@ function setupIPC() {
                 }
             });
             
-            // Add to DriveManager (single source of truth)
-            const driveEntry = await driveManager.add({
+            // Add to drives state (single source of truth)
+            const driveEntry = await hyperdriveManager.addDriveEntry({
                 id: driveId,
                 key: session.metadata?.key,
                 shareLink: session.shareLink || `peardrop://${session.metadata?.key || 'unknown'}`,
@@ -489,7 +495,7 @@ function setupIPC() {
     // Get drive info by ID
     ipcMain.handle('drive-get', async (event, { id }) => {
         try {
-            const drive = driveManager.get(id);
+            const drive = hyperdriveManager.getDriveEntry(id);
             if (!drive) {
                 return { success: false, error: 'Drive not found' };
             }
@@ -506,7 +512,7 @@ function setupIPC() {
     // Get all drives
     ipcMain.handle('drives-list', async () => {
         try {
-            const drives = driveManager.getAll();
+            const drives = hyperdriveManager.getAllDriveEntries();
             return { success: true, drives };
         } catch (error) {
             return { success: false, error: error.message };
@@ -521,11 +527,11 @@ function setupIPC() {
             // Stop the hyperdrive but keep storage
             const session = hyperdriveManager.activeDrives.get(id);
             if (session) {
-                await hyperdriveManager.stopDrive(id, { purge: false });
+                await hyperdriveManager.stopDrive(id, { delete: false });
             }
             
-            // Update DriveManager state
-            const entry = await driveManager.pause(id);
+            // Update drive state
+            const entry = await hyperdriveManager.pauseDriveEntry(id);
             
             return { success: true, entry };
         } catch (error) {
@@ -541,7 +547,7 @@ function setupIPC() {
             
             // TODO: Implement re-joining swarm for paused drives
             // For now, just update state
-            const entry = await driveManager.resume(id);
+            const entry = await hyperdriveManager.resumeDriveEntry(id);
             
             return { success: true, entry };
         } catch (error) {
@@ -559,17 +565,24 @@ function setupIPC() {
             const session = hyperdriveManager.activeDrives.get(id);
             if (session) {
                 console.log('[PearDrop] Stopping active drive', { id });
-                await hyperdriveManager.stopDrive(id, { purge: true });
+                await hyperdriveManager.stopDrive(id, { delete: true });
             }
             
-            // Remove via DriveManager (handles storage + optional file deletion)
-            const success = await driveManager.remove(id, { 
+            // Remove via drive state (handles storage + optional file deletion)
+            const success = await hyperdriveManager.removeDriveEntry(id, { 
                 deleteFiles, 
                 deleteStorage: true 
             });
             
-            // Notify renderer
-            if (success && mainWindow && !mainWindow.isDestroyed()) {
+            console.log('[DEBUG] removeDriveEntry result:', {
+                id,
+                success,
+                mainWindowExists: !!mainWindow,
+                mainWindowDestroyed: mainWindow?.isDestroyed()
+            });
+            
+            // Notify renderer (send event even if entry was already removed from manifest)
+            if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('drives-updated', {
                     action: 'removed',
                     id
@@ -587,13 +600,13 @@ function setupIPC() {
     // Check local file availability for all drives
     ipcMain.handle('drives-check-files', async () => {
         try {
-            const drives = driveManager.getAll();
+            const drives = hyperdriveManager.getAllDriveEntries();
             const results = [];
             
             for (const drive of drives) {
-                const available = await driveManager.checkLocalAvailability(drive.id);
+                const available = await hyperdriveManager.checkLocalAvailability(drive.id);
                 if (available !== drive.isLocalAvailable) {
-                    await driveManager.update(drive.id, { isLocalAvailable: available });
+                    await hyperdriveManager.updateDriveEntry(drive.id, { isLocalAvailable: available });
                 }
                 results.push({ ...drive, isLocalAvailable: available });
             }
@@ -731,6 +744,92 @@ function setupIPC() {
 }
 
 // ============================================================================
+// Migration Check (can be safely removed after migration completes)
+// ============================================================================
+
+/**
+ * Check if drive data migration is needed and run with user consent
+ */
+async function checkAndRunMigration() {
+    if (!migrationTool) {
+        // Migration tool not available - continue normally
+        return;
+    }
+
+    try {
+        const migrationCheck = await migrationTool.checkMigrationNeeded();
+        
+        if (!migrationCheck.needed) {
+            console.log('[PearDrop] No migration needed:', migrationCheck.reason);
+            return;
+        }
+
+        console.log('[PearDrop] Migration needed:', migrationCheck.summary);
+
+        // Show user consent dialog
+        const { dialog } = require('electron');
+        const response = await dialog.showMessageBox(mainWindow, {
+            type: 'question',
+            buttons: ['Migrate Drives', 'Skip (Boot Normally)'],
+            defaultId: 0,
+            cancelId: 1,
+            title: 'Drive Data Migration',
+            message: 'Saved drives need to be updated to the new format',
+            detail: `Found ${migrationCheck.summary.totalToMigrate} drives that need migration.\n\n` +
+                   `• ${migrationCheck.summary.driveManagerDrives} drives from old UI data\n` +
+                   `• ${migrationCheck.summary.hyperdriveManagerDrives} drives from P2P data\n` +
+                   `• ${migrationCheck.summary.orphanedDrives} orphaned drives will be cleaned\n\n` +
+                   `Your original files will be backed up safely.\n\n` +
+                   `Click "Migrate Drives" to update, or "Skip" to continue without migration.`,
+            checkboxLabel: 'Remember this choice (migration can be run later)',
+            checkboxChecked: false
+        });
+
+        if (response.response === 0) {
+            // User chose to migrate
+            console.log('[PearDrop] Starting migration with user consent...');
+            
+            const migrationResult = await migrationTool.runMigration();
+            
+            if (migrationResult.success) {
+                console.log('[PearDrop] Migration completed successfully:', {
+                    migrated: migrationResult.migrated,
+                    cleaned: migrationResult.cleaned,
+                    backedUp: migrationResult.backed_up
+                });
+                
+                // Show success notification
+                await dialog.showMessageBox(mainWindow, {
+                    type: 'info',
+                    buttons: ['Continue'],
+                    title: 'Migration Complete',
+                    message: `Successfully migrated ${migrationResult.migrated} drives`,
+                    detail: `Cleaned ${migrationResult.cleaned} orphaned drives.\n` +
+                           `Original files backed up:\n${migrationResult.backed_up.join('\n')}`
+                });
+            } else {
+                console.error('[PearDrop] Migration failed:', migrationResult.error);
+                
+                // Show error but continue
+                await dialog.showMessageBox(mainWindow, {
+                    type: 'warning',
+                    buttons: ['Continue Anyway'],
+                    title: 'Migration Failed',
+                    message: 'Drive migration failed, but app will continue normally',
+                    detail: `Error: ${migrationResult.error}\n\nYou can try migration again later.`
+                });
+            }
+        } else {
+            console.log('[PearDrop] User skipped migration, continuing normally');
+        }
+        
+    } catch (error) {
+        console.error('[PearDrop] Migration check failed:', error);
+        // Continue normally - don't let migration errors block startup
+    }
+}
+
+// ============================================================================
 // App Lifecycle
 // ============================================================================
 
@@ -740,11 +839,21 @@ app.whenReady().then(async () => {
         setupIPC();
         createWindow();
         
+        // Check for drive data migration (can be safely removed later)
+        await checkAndRunMigration();
+        
         // Initialize Hyperdrive manager
         await hyperdriveManager.init();
         
-        // Initialize DriveManager (single source of truth for UI)
-        await driveManager.init();
+        // Notify frontend that drives have been loaded (especially after migration)
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            const drives = hyperdriveManager.getAllDriveEntries();
+            mainWindow.webContents.send('drives-updated', {
+                action: 'loaded',
+                drives: drives
+            });
+            console.log('[PearDrop] Notified frontend of loaded drives:', drives.length);
+        }
         
         // Forward progress events to renderer
         hyperdriveManager.on('peer-connected', (data) => {
@@ -794,10 +903,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
-    // Stop all shares and cleanup
+    // Just disconnect from network, preserve all drives and storage
     try {
-        await hyperdriveManager.stopAll({ purge: true });
-        console.log('[PearDrop] Shares cleaned up');
+        await hyperdriveManager.stopAll({ delete: false });
+        console.log('[PearDrop] Disconnected from network');
     } catch (error) {
         console.error('[PearDrop] Cleanup error:', error);
     }
@@ -815,7 +924,7 @@ app.on('activate', () => {
 
 app.on('before-quit', async () => {
     try {
-        await hyperdriveManager.stopAll({ purge: true });
+        await hyperdriveManager.stopAll({ delete: false });
     } catch (error) {
         console.error('[PearDrop] Cleanup error:', error);
     }
