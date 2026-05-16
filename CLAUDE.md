@@ -263,14 +263,16 @@ peardrop stop    # stop all shares
 - `file-utils.js`: getUniqueFilePath, ensureDir, formatBytes
 - `renderer.js`: UI only
 - `index.html`: Styles only
+- `manifest-recovery.js`: Robust manifest recovery and validation (v0.19.1)
 
 ### Storage Locations
 - `~/peardrop/drives/` - Hyperdrive corestore data (per-drive directories)
-- `~/peardrop/drives.json` - DriveManager state (single source of truth)
+- `~/peardrop/drives-state.json` - Persistent drive tracking with recovery support (v0.19.1)
 - `~/peardrop/downloads/` - Downloaded files land here
 - `/.peardrop.json` (inside drives) - Share metadata for receivers
 
 **Deprecated (v0.17.0):**
+- `~/peardrop/drives.json` - Old DriveManager state file
 - `~/peardrop/drives-manifest.json` - Old hyperdrive tracking
 - `~/peardrop/download-history.json` - Old download history
 
@@ -280,6 +282,26 @@ peardrop stop    # stop all shares
 3. **Manifest-first download** - Read manifest before downloading files
 4. **Blobs core hook** - Track download progress via `blobs.core.on('download')`
 5. **Background sharing** - Use `nohup` to keep shares alive
+6. **Bulletproof manifest recovery** (v0.19.1) - Isolated recovery system with fallback strategies
+
+### Manifest Recovery System (v0.19.1)
+
+**File:** `lib/manifest-recovery.js` - Isolated module for robust drives-state.json handling
+
+**Recovery Strategies (in order):**
+1. **Normal load** - Try standard JSON.parse first
+2. **Partial recovery** - Extract valid drive entries from corrupted JSON using regex
+3. **Complete rebuild** - Scan all Corestore folders and reconstruct metadata
+4. **Empty fallback** - Return clean manifest if all strategies fail
+
+**Key Methods:**
+- `loadWithRecovery()` - Main entry point, tries all strategies automatically
+- `validateAndSync()` - Ensures manifest ↔ drive folders consistency
+- `rebuildFromDrives()` - Scans `CORESTORE` folders to rebuild complete state
+- `scanDriveFolder(driveId)` - Extracts metadata from individual drive folder
+- `cleanupOrphans()` - Removes orphaned drives/manifest entries
+
+**Integration:** HyperdriveManager uses ManifestRecovery for all manifest operations instead of basic `fs.readFile()`
 
 ---
 

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\(0,'utf8'\\);const p=JSON.parse\\(d\\);console.log\\('electron:',p.devDependencies?.electron||p.dependencies?.electron\\);console.log\\('node ver:'\\);process.exit\\(\\)\")",
-      "Bash(npx electron:*)"
+      "Bash(npx electron:*)",
+      "Read(//Users/guy/Anjou/PearDrop-Desktop-a/lib/**)",
+      "Bash(node --check /Users/guy/Anjou/PearDrop-Desktop/preload.js)"
     ]
   }
 }
