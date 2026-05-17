@@ -1,7 +1,7 @@
 /**
  * MODULE: main.js (PearDrop v2)
  * PURPOSE: Electron main process for PearDrop - P2P file sharing
- * VERSION: 0.18.0
+ * VERSION: 0.19.1
  * 
  * EXPORTS: None (entry point)
  * 
@@ -641,6 +641,39 @@ function setupIPC() {
     });
 
     // ========================================================================
+    // App version — used by the one-time reset notice in the renderer to
+    // detect upgrade-across-fix-boundary scenarios.
+    // ========================================================================
+    ipcMain.handle('get-app-version', async () => {
+        return app.getVersion();
+    });
+
+    // ========================================================================
+    // Legacy data detection — fallback for the one-time "share history was
+    // reset" notice when localStorage has no lastSeenVersion yet (i.e. the
+    // first launch after this build ships). Returns true if any pre-unified
+    // state file is on disk (drives.json or drives-manifest.json), meaning
+    // the user ran an older build that lost data to the purge-on-close bug.
+    // Safe to remove together with the notice once retired.
+    // ========================================================================
+    ipcMain.handle('check-legacy-data-present', async () => {
+        const os = require('os');
+        const path = require('path');
+        const fs = require('fs').promises;
+        const candidates = [
+            path.join(os.homedir(), 'peardrop', 'drives.json'),
+            path.join(os.homedir(), 'peardrop', 'drives-manifest.json')
+        ];
+        for (const file of candidates) {
+            try {
+                await fs.access(file);
+                return { present: true };
+            } catch { /* missing — try next */ }
+        }
+        return { present: false };
+    });
+
+    // ========================================================================
     // File Stats (with folder expansion)
     // ========================================================================
 
@@ -839,8 +872,33 @@ app.whenReady().then(async () => {
         setupIPC();
         createWindow();
         
-        // Check for drive data migration (can be safely removed later)
-        await checkAndRunMigration();
+        // -------------------------------------------------------------------
+        // Migration prompt — PAUSED (2026-05-13)
+        // -------------------------------------------------------------------
+        // The legacy → unified state migration is intentionally disabled.
+        //
+        // Why it's paused:
+        //   • The previous purge-on-close bug (see fix in stopAll handlers)
+        //     left most users with empty/orphaned legacy state files, which
+        //     made checkMigrationNeeded() return `true` on every launch
+        //     and re-prompted the dialog every time.
+        //   • Until we revisit the migration UX (auto-skip when nothing
+        //     real to migrate, persist the "remember this choice" flag,
+        //     and consume the legacy files after a successful run), it
+        //     is friendlier to skip the prompt entirely and inform users
+        //     about the reset via a one-time in-app notice instead.
+        //
+        // What still lives in the codebase, untouched, for future use:
+        //   • lib/migration.js                — the migration logic itself
+        //   • checkAndRunMigration() below    — the user-consent flow
+        //   • The optional require near the top of main.js
+        //
+        // How to re-enable when the UX is ready:
+        //   • Uncomment the `await checkAndRunMigration();` line below.
+        //   • Make sure response.checkboxChecked is read & persisted, and
+        //     that legacy files are moved (not just copied) after success.
+        //
+        // await checkAndRunMigration();
         
         // Initialize Hyperdrive manager
         await hyperdriveManager.init();

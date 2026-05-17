@@ -1,7 +1,7 @@
 /**
  * MODULE: renderer.js (PearDrop v2)
  * PURPOSE: PearDrop UI - Integrated ScrollList + DriveItem with PearCore backend
- * VERSION: 0.18.1
+ * VERSION: 0.19.1
  * 
  * ARCHITECTURE:
  *   - Uses ScrollList v2 slot-based system
@@ -80,6 +80,7 @@ const qrUploadBtn = document.getElementById('qrUploadBtn');
 let initialized = false;        // Guard against double init
 let activeFiles = [];           // Files selected for sharing
 let currentShareLink = null;    // Active share link
+let pendingShareAnimationId = null; // Drive added silently behind share modal — animate on close
 let driveActions = null;        // DriveActions instance (set in init)
 let currentDriveId = null;      // Active drive ID
 let drives = [];                // All drives from HyperdriveManager
@@ -107,7 +108,7 @@ function init() {
 
     // Initialize ScrollList with DriveItem factory
     scrollList = new ScrollList(listContainer, {
-        emptyMessage: 'No active transfers',
+        emptyMessage: 'No transfers yet — drop files above or paste a link to start',
         gap: 8,
         padding: 12,
         keyField: 'id',
@@ -135,17 +136,39 @@ function init() {
                 }
                 
                 console.log('[DEBUG] DriveActions - calling action:', event.action, 'for drive:', event.data.id);
-                
+
+                // Remove flow: start a 5s undo countdown. Backend isn't called
+                // until the timer expires. Undo cancels the timer and restores
+                // the drive UI — no rollback needed because nothing ran yet.
+                if (event.action === 'remove') {
+                    startDeletionCountdown(event.data.id, {
+                        onExpire: async () => {
+                            const result = await driveActions.handle('remove', event.data);
+                            // Backend always emits the 'drives-updated' { action: 'removed' }
+                            // IPC, which removes the slot via the exit animation. The
+                            // success flag can be `false` for benign reasons (e.g.,
+                            // orphan drives missing from the state manifest) — only
+                            // surface a toast when there's an actual error message.
+                            if (!result.success && result.error) {
+                                cancelDeletionCountdown(event.data.id);
+                                showToast('Delete failed: ' + result.error, 'error');
+                            }
+                        }
+                        // onUndo intentionally omitted — backend was never called.
+                    });
+                    return;
+                }
+
                 const result = await driveActions.handle(event.action, event.data);
-                
+
                 console.log('[DEBUG] DriveActions - result:', {
                     action: event.action,
                     driveId: event.data.id,
                     success: result.success,
                     error: result.error
                 });
-                
-                // Update UI based on action result (remove action now handled by drives-updated event)
+
+                // Update UI based on action result
                 if (result.success) {
                     if (event.action === 'pause') {
                         updateDriveInList({ id: event.data.id, status: 'paused' });
@@ -170,10 +193,14 @@ function init() {
     bindModals();
     bindIPC();
     bindScrollListEvents();
-    
+
+    // One-time "share history was reset" notice — see HTML modal + IPC handler.
+    // Safe to remove this call (and the function) once the notice is retired.
+    showResetNoticeIfNeeded();
+
     // Initialize sort UI
     updateSortUI();
-    
+
     // Load existing drives
     loadDrives();
 }
@@ -276,11 +303,13 @@ function updateDropZone() {
         filePreview.classList.remove('active');
         dropZone.classList.remove('has-files');
         shareBtn.disabled = true;
+        shareBtn.classList.remove('is-ready');
     } else {
         dropContent.classList.add('hidden');
         filePreview.classList.add('active');
         dropZone.classList.add('has-files');
         shareBtn.disabled = false;
+        shareBtn.classList.add('is-ready');
         
         const file = activeFiles[0];
         fileIcon.textContent = getFileIcon(file.name);
@@ -346,13 +375,15 @@ function handleScannedLink(text) {
     linkInput.value = text;
     linkInput.classList.add('flash');
     setTimeout(() => linkInput.classList.remove('flash'), 500);
+    showToast('Link captured', 'success');
     //startDownload(); // a plan for later on
 }
 
 async function startShare() {
     if (activeFiles.length === 0) return;
-    
+
     shareBtn.disabled = true;
+    shareBtn.classList.remove('is-ready');
     shareBtn.textContent = 'SHARING...';
     
     try {
@@ -371,7 +402,11 @@ async function startShare() {
             currentDriveId = result.driveId;
             showShareModal(result.shareLink);
             
-            // Add to list
+            // Add to list but park it invisibly — the share-link modal is on
+            // top, so the user shouldn't see the new item peeking through the
+            // modal's backdrop blur. deferAnimation pre-collapses the slot;
+            // closeShareModal() will play the entrance once the modal is gone.
+            pendingShareAnimationId = result.driveId;
             addDriveToList({
                 id: result.driveId,
                 title: shareName,
@@ -382,7 +417,7 @@ async function startShare() {
                 peers: 0,
                 type: 'share',
                 shareLink: result.shareLink
-            });
+            }, { deferAnimation: true });
             
             // Clear drop zone after successful share
             clearFiles();
@@ -393,8 +428,14 @@ async function startShare() {
         console.error('Share error:', err);
         showToast('Share failed: ' + err.message, 'error');
     } finally {
-        shareBtn.disabled = false;
         shareBtn.textContent = 'SHARE';
+        // Re-enable only if files remain. After a successful share,
+        // clearFiles() drains activeFiles → button stays disabled until the
+        // user picks more files. After a failed share, files are still here
+        // so the user can retry.
+        const hasFiles = activeFiles.length > 0;
+        shareBtn.disabled = !hasFiles;
+        shareBtn.classList.toggle('is-ready', hasFiles);
     }
 }
 
@@ -427,7 +468,7 @@ async function startDownload() {
         return;
     }
     
-    // 2. Not a duplicate - add to list immediately
+    // 2. Not a duplicate - add to list immediately (animate — fresh download)
     const tempId = `dl_${Date.now()}`;
     console.log('[PearDrop] Adding to list:', tempId);
     addDriveToList({
@@ -438,7 +479,7 @@ async function startDownload() {
         peers: 0,
         type: 'download',
         shareLink: link
-    });
+    }, { animate: true });
     console.log('[PearDrop] Added to list, driveItems size:', driveItems.size);
     
     // 3. Open drive (skip duplicate check since we already did it)
@@ -446,7 +487,7 @@ async function startDownload() {
     
     if (!openResult.success) {
         updateDriveInList({ id: tempId, status: 'error' });
-        setTimeout(() => removeDriveFromList(tempId), 5000);
+        setTimeout(() => removeDriveFromList(tempId, { animate: true }), 5000);
         return;
     }
     
@@ -557,11 +598,98 @@ async function handleDownload(driveId, link) {
 function bindModals() {
     copyLinkBtn.addEventListener('click', copyShareLink);
     closeShareBtn.addEventListener('click', closeShareModal);
-    
+
     // Close on backdrop click
     shareModal.addEventListener('click', (e) => {
         if (e.target === shareModal) closeShareModal();
     });
+}
+
+// One-time "share history was reset" notice.
+//
+// Gating logic:
+//   1. If user already dismissed (SEEN_FLAG) → skip.
+//   2. If lastSeenVersion is tracked → show only when the user has crossed
+//      the fix boundary (lastSeen < FIX_VERSION ≤ current).
+//   3. If lastSeenVersion is missing (first launch on this build) → use
+//      legacy-data presence as a tiebreaker: fresh install → no notice;
+//      old data on disk → notice.
+//
+// FIX_VERSION = the first build that contained the persistence fix.
+// Bump it forward only if a future fix produces a new one-time notice.
+//
+// Safe to retire by removing this function, its call site, the modal
+// HTML/CSS, the preload bridges, and the matching IPC handlers.
+async function showResetNoticeIfNeeded() {
+    const SEEN_FLAG = 'peardrop:resetNoticeSeen';
+    const VERSION_KEY = 'peardrop:lastSeenVersion';
+    const FIX_VERSION = '0.19.1';
+
+    if (localStorage.getItem(SEEN_FLAG) === '1') return;
+
+    let currentVersion = null;
+    try {
+        currentVersion = await window.electronAPI.getAppVersion();
+    } catch {
+        return; // can't reach main — bail silently
+    }
+    if (!currentVersion) return;
+
+    const lastSeen = localStorage.getItem(VERSION_KEY);
+    let shouldShow = false;
+
+    if (lastSeen) {
+        // We know which version they ran last. Show only on first launch
+        // of a build that includes the fix, when the previous build didn't.
+        shouldShow = semverLt(lastSeen, FIX_VERSION) && !semverLt(currentVersion, FIX_VERSION);
+    } else {
+        // No tracked version yet — could be either a true fresh install or
+        // a first launch after upgrading from a pre-tracking build. Use the
+        // legacy state files as a tiebreaker.
+        try {
+            const { present } = await window.electronAPI.checkLegacyDataPresent();
+            shouldShow = present && !semverLt(currentVersion, FIX_VERSION);
+        } catch {
+            shouldShow = false;
+        }
+    }
+
+    // Always record the current version so we never re-check this case again
+    localStorage.setItem(VERSION_KEY, currentVersion);
+
+    if (!shouldShow) {
+        localStorage.setItem(SEEN_FLAG, '1');
+        return;
+    }
+
+    const modal = document.getElementById('resetNoticeModal');
+    const okBtn = document.getElementById('resetNoticeOkBtn');
+    if (!modal || !okBtn) return;
+
+    const dismiss = () => {
+        modal.classList.remove('active');
+        localStorage.setItem(SEEN_FLAG, '1');
+    };
+    okBtn.addEventListener('click', dismiss, { once: true });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) dismiss();
+    }, { once: true });
+
+    modal.classList.add('active');
+}
+
+// Tiny semver "less-than" comparison for MAJOR.MINOR.PATCH strings.
+// Only used by showResetNoticeIfNeeded — remove when the notice is retired.
+function semverLt(a, b) {
+    const aa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+    const bb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < 3; i++) {
+        const av = aa[i] || 0;
+        const bv = bb[i] || 0;
+        if (av < bv) return true;
+        if (av > bv) return false;
+    }
+    return false;
 }
 
 async function showShareModal(link) {
@@ -588,6 +716,15 @@ async function showShareModal(link) {
 function closeShareModal() {
     shareModal.classList.remove('active');
     document.getElementById('shareQrCode').style.display = 'none';
+
+    // The new share was added silently behind this modal so updates could
+    // route to it during the modal's lifetime. Animate it in now that the
+    // user can actually see the list.
+    if (pendingShareAnimationId) {
+        const id = pendingShareAnimationId;
+        pendingShareAnimationId = null;
+        scrollList.animateSlotEntrance(id);
+    }
 }
 
 async function copyShareLink() {
@@ -607,24 +744,28 @@ async function copyShareLink() {
 // DRIVE LIST MANAGEMENT
 // ============================================================================
 
-function addDriveToList(drive) {
+function addDriveToList(drive, options = {}) {
     console.log('[addDriveToList] called with:', drive.id, drive.title, drive.status);
-    
+
     // Check if already exists
     if (driveItems.has(drive.id)) {
         console.log('[addDriveToList] already exists, updating');
         updateDriveInList(drive);
         return;
     }
-    
+
     // Add timestamp for sorting
     drive.addedAt = Date.now();
-    
+
     // Always add to top of list first (newest at top)
     drives.unshift(drive);
-    const result = scrollList.addItem(drive, { prepend: true });
+    const result = scrollList.addItem(drive, {
+        prepend: true,
+        animate: options.animate === true,
+        deferAnimation: options.deferAnimation === true
+    });
     console.log('[addDriveToList] scrollList.addItem result:', result?.id, 'component:', !!result?.component);
-    
+
     // If we have a non-recent sort active, re-apply sorting
     // (but new items still briefly appear at top, then sort into place)
     if (sortField !== 'recent' && sortField !== 'custom') {
@@ -659,15 +800,131 @@ function updateDriveInList(drive) {
     }
 }
 
-function removeDriveFromList(driveId) {
+// Active per-drive deletion countdowns. Map<driveId, { intervalId, overlay, slot }>.
+// Used by startDeletionCountdown / cancelDeletionCountdown so an app close or
+// repeat-remove can clean up cleanly.
+const deletionTimers = new Map();
+
+// Begin a 5-second undo window before actually deleting a drive. Inserts a
+// circular countdown button (replacing the right-side menu visually) and dims
+// the slot's content. If the user clicks the button → onUndo runs and the
+// drive is restored (no backend call ever fired). If the timer expires →
+// onExpire runs (this is when the real backend delete should happen).
+function startDeletionCountdown(driveId, { onExpire, onUndo } = {}) {
+    const totalSeconds = 5;
+    const slotData = scrollList && scrollList._slots && scrollList._slots.get(driveId);
+    if (!slotData || !slotData.slot) {
+        // No slot to attach to — just fire the expire path immediately
+        if (typeof onExpire === 'function') onExpire();
+        return;
+    }
+
+    // Cancel any prior countdown on this drive
+    if (deletionTimers.has(driveId)) {
+        cancelDeletionCountdown(driveId);
+    }
+
+    const slot = slotData.slot;
+    slot.classList.add('is-pending-delete');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'drive-delete-countdown';
+    overlay.innerHTML =
+        '<div class="drive-undo-timer" aria-label="Time until delete">' +
+            '<svg class="drive-undo-ring" viewBox="0 0 36 36" aria-hidden="true">' +
+                '<circle class="drive-undo-ring-bg" cx="18" cy="18" r="15.9155"/>' +
+                '<circle class="drive-undo-ring-fg" cx="18" cy="18" r="15.9155"/>' +
+            '</svg>' +
+            '<span class="drive-undo-label">' + totalSeconds + '</span>' +
+        '</div>' +
+        '<button class="drive-undo-btn" type="button" title="Cancel delete">Undo</button>';
+    slot.appendChild(overlay);
+
+    const undoBtn = overlay.querySelector('.drive-undo-btn');
+    const ringFg = overlay.querySelector('.drive-undo-ring-fg');
+    const label = overlay.querySelector('.drive-undo-label');
+
+    // Kick off the ring drain across totalSeconds. Double-rAF so the browser
+    // commits the initial (full ring) state before transitioning to empty.
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            ringFg.style.transition = 'stroke-dashoffset ' + totalSeconds + 's linear';
+            ringFg.style.strokeDashoffset = '100';
+        });
+    });
+
+    let secondsLeft = totalSeconds;
+    const intervalId = setInterval(() => {
+        secondsLeft -= 1;
+        if (secondsLeft > 0) {
+            label.textContent = secondsLeft;
+        } else {
+            clearInterval(intervalId);
+            // Number disappears (drained ring tells the visual story);
+            // the button takes over communicating the state.
+            label.textContent = '';
+            undoBtn.disabled = true;
+            undoBtn.textContent = 'Deleting…';
+            const entry = deletionTimers.get(driveId);
+            if (entry) entry.expired = true;
+            if (typeof onExpire === 'function') onExpire();
+        }
+    }, 1000);
+
+    undoBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cancelDeletionCountdown(driveId);
+        if (typeof onUndo === 'function') onUndo();
+    });
+
+    deletionTimers.set(driveId, { intervalId, overlay, slot, expired: false });
+}
+
+function cancelDeletionCountdown(driveId) {
+    const entry = deletionTimers.get(driveId);
+    if (!entry) return;
+    clearInterval(entry.intervalId);
+    if (entry.overlay && entry.overlay.parentNode) entry.overlay.remove();
+    if (entry.slot) entry.slot.classList.remove('is-pending-delete');
+    deletionTimers.delete(driveId);
+}
+
+// Show / hide a "Deleting…" overlay on a drive slot while the backend works.
+// Backend removal can take a moment (close swarm, close drive, rm storage),
+// so the user needs visible feedback that something is happening. The slot
+// is dimmed underneath; the overlay sits above with a spinner + label.
+function setDriveDeleting(driveId, isDeleting) {
+    const slotData = scrollList && scrollList._slots && scrollList._slots.get(driveId);
+    if (!slotData || !slotData.slot) return;
+    const slot = slotData.slot;
+
+    if (isDeleting) {
+        slot.classList.add('is-deleting');
+        if (!slot.querySelector('.drive-deleting-overlay')) {
+            const overlay = document.createElement('div');
+            overlay.className = 'drive-deleting-overlay';
+            overlay.innerHTML =
+                '<span class="drive-deleting-spinner" aria-hidden="true"></span>' +
+                '<span>Deleting…</span>';
+            slot.appendChild(overlay);
+        }
+    } else {
+        slot.classList.remove('is-deleting');
+        const overlay = slot.querySelector('.drive-deleting-overlay');
+        if (overlay) overlay.remove();
+    }
+}
+
+function removeDriveFromList(driveId, options = {}) {
     console.log('[DEBUG] removeDriveFromList called:', {
         driveId,
+        animate: options.animate === true,
         driveItemExists: driveItems.has(driveId),
         scrollListHasSlot: scrollList._slots?.has(driveId) || 'unknown',
         drivesArrayLength: drives.length,
         driveInArray: drives.some(d => d.id === driveId)
     });
-    
+
     // Step 1: Remove from driveItems Map
     const hadDriveItem = driveItems.has(driveId);
     driveItems.delete(driveId);
@@ -675,21 +932,24 @@ function removeDriveFromList(driveId) {
         hadDriveItem,
         nowHas: driveItems.has(driveId)
     });
-    
-    // Step 2: Remove from ScrollList
+
+    // Step 2: Remove from ScrollList (animated if requested — the slot stays
+    // in the DOM during the transition but is detached from internal tracking)
     const hadScrollListSlot = scrollList._slots?.has(driveId);
     console.log('[DEBUG] Before scrollList.removeItem():', {
         hadScrollListSlot,
         scrollListSlotCount: scrollList._slots?.size || 'unknown'
     });
-    
-    const scrollListResult = scrollList.removeItem(driveId);
+
+    const scrollListResult = scrollList.removeItem(driveId, {
+        animate: options.animate === true
+    });
     console.log('[DEBUG] After scrollList.removeItem():', {
         result: scrollListResult,
         nowHasSlot: scrollList._slots?.has(driveId) || 'unknown',
         scrollListSlotCount: scrollList._slots?.size || 'unknown'
     });
-    
+
     // Step 3: Remove from drives array
     const originalLength = drives.length;
     drives = drives.filter(d => d.id !== driveId);
@@ -833,8 +1093,8 @@ function bindIPC() {
                 scrollListHasSlot: scrollList._slots?.has(data.id) || 'unknown'
             });
             
-            removeDriveFromList(data.id);
-            
+            removeDriveFromList(data.id, { animate: true });
+
             console.log('[DEBUG] onDrivesUpdated - after removal:', {
                 driveItemsSize: driveItems.size,
                 scrollListSize: scrollList._slots?.size || 'unknown',
@@ -842,13 +1102,13 @@ function bindIPC() {
                 scrollListHasSlot: scrollList._slots?.has(data.id) || 'unknown'
             });
         } else if (data.drives) {
-            // Legacy format or individual drive updates
+            // Legacy format or individual drive updates — animate the new ones
             for (const drive of data.drives) {
                 const normalized = normalizeDrive(drive);
                 if (driveItems.has(normalized.id)) {
                     updateDriveInList(normalized);
                 } else {
-                    addDriveToList(normalized);
+                    addDriveToList(normalized, { animate: true });
                 }
             }
         }
@@ -898,11 +1158,30 @@ function getFileIcon(filename) {
     return icons[ext] || '📄';
 }
 
+const TOAST_ICONS = {
+    success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>',
+    error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>'
+};
+
 function showToast(message, type = 'info') {
-    toast.textContent = message;
     toast.className = 'toast ' + type;
+    toast.innerHTML = '';
+
+    const iconSvg = TOAST_ICONS[type];
+    if (iconSvg) {
+        const icon = document.createElement('span');
+        icon.className = 'toast-icon';
+        icon.innerHTML = iconSvg;
+        toast.appendChild(icon);
+    }
+
+    const msg = document.createElement('span');
+    msg.className = 'toast-message';
+    msg.textContent = message;
+    toast.appendChild(msg);
+
     toast.classList.add('visible');
-    
+
     setTimeout(() => {
         toast.classList.remove('visible');
     }, 3000);
@@ -1191,7 +1470,7 @@ async function doClearTransfers(downloads, uploads) {
         try {
             const result = await window.electronAPI.drivesRemove?.({ id: drive.id, deleteFiles: false });
             if (result?.success !== false) {
-                removeDriveFromList(drive.id);
+                removeDriveFromList(drive.id, { animate: true });
                 cleared++;
             }
         } catch (err) {

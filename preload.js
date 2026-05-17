@@ -1,7 +1,7 @@
 /**
  * MODULE: preload.js
  * PURPOSE: Secure IPC bridge between renderer and main process
- * VERSION: 0.18.0
+ * VERSION: 0.19.1
  * 
  * EXPORTS (via window.electronAPI):
  *   INVOKE (renderer -> main):
@@ -79,6 +79,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // QR Code
     // ========================================================================
     generateQr: (text) => ipcRenderer.invoke('generate-qr', { text }),
+
+    // ========================================================================
+    // One-time reset notice — version + legacy-fallback gating.
+    // Safe to remove once the notice is retired.
+    // ========================================================================
+    getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+    checkLegacyDataPresent: () => ipcRenderer.invoke('check-legacy-data-present'),
 
     // ========================================================================
     // Debug Control
