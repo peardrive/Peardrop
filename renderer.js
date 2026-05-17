@@ -462,7 +462,7 @@ async function startDownload() {
     // 1. Check for duplicate (fast local check)
     const dupCheck = await window.electronAPI.hyperdriveCheckDuplicate({ shareLink: link });
     
-    if (dupCheck.isDuplicate && dupCheck.localStatus === 'available') {
+    if (dupCheck.isDuplicate) {
         highlightExistingDrive(dupCheck.driveId);
         showAlreadyDownloadedMessage('Already downloaded');
         return;

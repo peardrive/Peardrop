@@ -131,7 +131,7 @@ function createWindow() {
     } else {
         // Windows/Linux: standard title bar, solid background
         Object.assign(windowOptions, {
-            backgroundColor: '#1a1a2e',
+            backgroundColor: '#000000',
             // Frame is default true on Windows/Linux
             autoHideMenuBar: true  // Hide menu bar but allow Alt to show it
         });

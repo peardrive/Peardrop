@@ -1,5 +1,53 @@
 # PearDrop Changelog
 
+## v0.19.1 (2026-05-15) - Bulletproof Manifest Recovery & Deduplication Fixes 🔧
+
+**Robust manifest recovery system and improved drive deduplication**
+
+### Major Features
+- **🛡️ Bulletproof Manifest Recovery System**
+  - New isolated `ManifestRecovery` module for robust drives-state.json handling
+  - Automatically rebuilds manifest from existing Corestore drive folders
+  - Handles complete manifest corruption with partial recovery attempts
+  - Syncs manifest ↔ drive folders consistency automatically
+  - Backs up corrupted manifests before attempting recovery
+
+- **🔄 Enhanced Deduplication Logic**
+  - Fixed deduplication to block ALL duplicates, not just available ones
+  - Prevents duplicate downloads regardless of file availability status
+  - Improved user feedback for duplicate detection
+
+### Technical Improvements
+- **New ManifestRecovery Class** (`lib/manifest-recovery.js`)
+  - `loadWithRecovery()` - Main entry point with full recovery capability
+  - `rebuildFromDrives()` - Scans Corestore folders to rebuild complete manifest
+  - `validateAndSync()` - Ensures manifest and drive folders stay in sync
+  - `recoverPartial()` - Attempts to recover from corrupted JSON data
+  - `cleanupOrphans()` - Removes orphaned drives/manifest entries
+  - `scanDriveFolder()` - Extracts metadata from individual drive folders
+
+- **Recovery Integration**
+  - HyperdriveManager now uses ManifestRecovery for all manifest operations
+  - Graceful fallback from corruption → partial recovery → complete rebuild
+  - Proper state restoration for both upload and download drives
+  - Uploads resume as 'active', downloads restored as 'paused'
+
+### Bug Fixes
+- **🚫 Fixed duplicate bypass vulnerability** - Removed availability condition from deduplication check
+- **🔧 Enhanced manifest validation** - Empty manifests with existing drives now trigger rebuild instead of deletion
+- **📁 Improved drive scanning** - Validates Corestore directories before attempting drive operations
+- **📦 Removed 2GB file size limitation** - Replaced `fs.readFile()` and `fs.writeFile()` with streaming for both upload and download of large files
+
+### Architecture
+- **Modular Recovery System** - Isolated manifest recovery logic following "new features = isolated modules" principle
+- **Consistent State Management** - Single source of truth maintained across corruption scenarios
+- **Defensive Error Handling** - Multiple fallback strategies prevent total data loss
+
+### For Developers
+- Recovery system designed as isolated module to avoid contaminating core hyperdrive-manager
+- Comprehensive error handling with backup creation before any destructive operations
+- Full compatibility with existing drive storage format and IPC event system
+
 ## v0.19.0 (2026-05-10) - P2P Connectivity Overhaul 🔧
 
 **Major P2P reliability improvements and status system cleanup**
