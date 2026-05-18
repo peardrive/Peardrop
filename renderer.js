@@ -860,8 +860,11 @@ function startDeletionCountdown(driveId, { onExpire, onUndo } = {}) {
             label.textContent = secondsLeft;
         } else {
             clearInterval(intervalId);
-            // Number disappears (drained ring tells the visual story);
-            // the button takes over communicating the state.
+            // Timer's done. Hide the circle entirely and let a bigger
+            // "Deleting…" pill take over as the primary status indicator,
+            // with the slot's content blurred behind it.
+            overlay.classList.add('is-final');
+            slot.classList.add('is-deleting-now');
             label.textContent = '';
             undoBtn.disabled = true;
             undoBtn.textContent = 'Deleting…';
@@ -885,7 +888,10 @@ function cancelDeletionCountdown(driveId) {
     if (!entry) return;
     clearInterval(entry.intervalId);
     if (entry.overlay && entry.overlay.parentNode) entry.overlay.remove();
-    if (entry.slot) entry.slot.classList.remove('is-pending-delete');
+    if (entry.slot) {
+        entry.slot.classList.remove('is-pending-delete');
+        entry.slot.classList.remove('is-deleting-now');
+    }
     deletionTimers.delete(driveId);
 }
 

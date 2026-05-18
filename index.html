@@ -1215,10 +1215,20 @@
            the drive's right-side menu. Tap the button → cancel timer
            → drive restored. Timer runs out → real delete fires.
            ============================================================ */
+        /* Countdown — dim + soft blur so the undo control reads as the
+           focal point of the slot. */
         .scroll-list-slot.is-pending-delete > *:not(.drive-delete-countdown) {
-            opacity: 0.55;
-            transition: opacity 0.18s ease;
+            opacity: 0.5;
+            filter: blur(1.5px);
+            transition: opacity 0.18s ease, filter 0.25s ease;
             pointer-events: none;
+        }
+
+        /* Final state — heavier blur once the timer hits 0, "Deleting…"
+           pill is now the primary status. */
+        .scroll-list-slot.is-deleting-now > *:not(.drive-delete-countdown) {
+            opacity: 0.4;
+            filter: blur(3.5px);
         }
 
         .drive-delete-countdown {
@@ -1274,6 +1284,19 @@
             background: rgba(255, 255, 255, 0.06);
             color: rgba(255, 255, 255, 0.35);
             transform: none;
+        }
+
+        /* Final state — timer has run out. Hide the circle and bump the
+           "Deleting…" text so it reads as the primary status. */
+        .drive-delete-countdown.is-final .drive-undo-timer {
+            display: none;
+        }
+
+        .drive-delete-countdown.is-final .drive-undo-btn {
+            font-size: 13px;
+            font-weight: 600;
+            padding: 8px 16px;
+            letter-spacing: 0.2px;
         }
 
         .drive-undo-ring {
