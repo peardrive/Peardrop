@@ -30,7 +30,9 @@
         body::before {
             content: '';
             position: fixed;
-            inset: -15%;
+            /* top right bottom left — keeps the same overall size but shifts
+               the aurora layer 200px upward (top more negative, bottom less). */
+            inset: calc(-15% - 200px) -15% calc(-15% + 200px) -15%;
             z-index: 0;
             pointer-events: none;
             background:

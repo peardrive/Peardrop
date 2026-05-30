@@ -95,6 +95,18 @@ let isReorderMode = false;      // Manual reorder mode active
 // View state
 let isExpandedView = false;     // false = compact, true = expanded
 
+// File thumbnail cache for the expanded drive-item child rows.
+// Keyed by absolute file path → { kind: 'image' | 'icon' | 'none', src: string|null }.
+// Lives for the session; cleared on app restart. Avoids re-IPC on re-expand.
+const fileThumbnailCache = new Map();
+// Tracks paths currently being fetched so we don't kick off duplicate IPCs.
+const fileThumbnailPending = new Map();
+// driveIds for which we've already set the main thumbnail (single-file drives).
+// Prevents re-fetching the same thumbnail on every drive-data update.
+const singleFileDriveThumbsLoaded = new Set();
+// Same idea but for multi-file ("group") drives — first-file preview + count badge.
+const groupDriveThumbsLoaded = new Set();
+
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
@@ -178,7 +190,45 @@ function init() {
                     }
                 }
             });
-            item.on('click', (data) => log('Drive clicked:', data.id));
+            // Single-file drive click → open the file directly (matches the
+            // per-file click behavior in the multi-file expanded list).
+            item.on('click', async (data) => {
+                log('Drive clicked:', data.id);
+                const file = Array.isArray(data.files) && data.files.length === 1
+                    ? data.files[0]
+                    : null;
+                if (!file || !file.path) return;
+                try {
+                    const result = await window.electronAPI.openFile(file.path);
+                    if (!result || result.success === false) {
+                        showToast(result?.error || 'Could not open file', 'error');
+                    }
+                } catch (err) {
+                    showToast('Could not open file: ' + err.message, 'error');
+                }
+            });
+
+            // Open a specific file from the expanded child list
+            item.on('fileClick', async ({ file }) => {
+                if (!file || !file.path) {
+                    showToast('No local path for this file yet', 'error');
+                    return;
+                }
+                try {
+                    const result = await window.electronAPI.openFile(file.path);
+                    if (!result || result.success === false) {
+                        showToast(result?.error || 'Could not open file', 'error');
+                    }
+                } catch (err) {
+                    showToast('Could not open file: ' + err.message, 'error');
+                }
+            });
+
+            // Lazy thumbnail loading on expand
+            item.on('expand', ({ expanded, data: driveData }) => {
+                if (!expanded) return;
+                loadFileThumbnails(driveData.id);
+            });
             
             driveItems.set(data.id, item);
             return item;
@@ -412,7 +462,7 @@ async function startShare() {
                 title: shareName,
                 size: activeFiles.reduce((sum, f) => sum + (f.size || 0), 0),
                 fileCount: activeFiles.length,
-                files: activeFiles.map(f => ({ name: f.name, size: f.size })),
+                files: activeFiles.map(f => ({ name: f.name, size: f.size, path: f.path })),
                 status: 'sharing',
                 peers: 0,
                 type: 'share',
@@ -771,6 +821,12 @@ function addDriveToList(drive, options = {}) {
     if (sortField !== 'recent' && sortField !== 'custom') {
         setTimeout(() => applySorting(), 100);
     }
+
+    // Replace the generic 📤/⬇️ emoji in the main thumb slot with something
+    // useful: single-file → real preview, multi-file → first preview + count badge.
+    // Fire-and-forget; falls back silently to the lib's emoji.
+    loadSingleFileThumbnail(drive.id);
+    loadGroupThumbnail(drive.id);
 }
 
 function updateDriveInList(drive) {
@@ -1107,6 +1163,23 @@ function bindIPC() {
                 driveItemExists: driveItems.has(data.id),
                 scrollListHasSlot: scrollList._slots?.has(data.id) || 'unknown'
             });
+        } else if (data.action === 'added' && data.entry) {
+            // Single-drive added/refreshed event — fires after share creation
+            // AND after a download completes (with paths populated). If we
+            // already have the slot, merge new data so file paths land; if
+            // not (rare), create it. This is how downloaded file paths
+            // propagate to the UI without an app reload.
+            const normalized = normalizeDrive(data.entry);
+            if (driveItems.has(normalized.id)) {
+                updateDriveInList(normalized);
+            } else {
+                addDriveToList(normalized, { animate: true });
+            }
+            // Now that the path is on the drive, retry the main thumbnail
+            // for single-file drives. (addDriveToList already tries on first
+            // mount, but for downloads it usually doesn't have a path yet.)
+            loadSingleFileThumbnail(normalized.id);
+            loadGroupThumbnail(normalized.id);
         } else if (data.drives) {
             // Legacy format or individual drive updates — animate the new ones
             for (const drive of data.drives) {
@@ -1142,6 +1215,382 @@ function parseSpeed(speedStr) {
     const unit = match[2].toUpperCase();
     const multipliers = { 'B': 1, 'KB': 1024, 'MB': 1024*1024, 'GB': 1024*1024*1024 };
     return value * (multipliers[unit] || 1);
+}
+
+// File extensions Chromium can decode natively into a <video> element.
+// Anything outside this set silently falls back to the OS icon via the
+// existing get-file-thumbnail IPC (mkv/avi/wmv etc.).
+const VIDEO_EXTS = new Set(['.mp4', '.webm', '.m4v', '.mov', '.ogv', '.ogg']);
+
+function getFileExt(name) {
+    if (!name) return '';
+    const i = name.lastIndexOf('.');
+    return i >= 0 ? name.slice(i).toLowerCase() : '';
+}
+
+// Extract a first-frame thumbnail from a local video file using a hidden
+// <video> element + a small canvas. Output is 80x80 JPEG so the encoded
+// data: URL stays tiny (faster encode, smaller memory cost). Resolves with
+// { kind: 'image', src }, rejects on any failure — caller falls back to
+// the OS-icon path.
+function generateVideoThumb(filePath) {
+    return new Promise((resolve, reject) => {
+        if (!filePath) return reject(new Error('No path'));
+
+        const video = document.createElement('video');
+        video.preload = 'metadata';
+        video.muted = true;
+        video.playsInline = true;
+        // Keep it out of the layout / off-screen
+        video.style.position = 'fixed';
+        video.style.left = '-9999px';
+        video.style.top = '0';
+        video.style.width = '1px';
+        video.style.height = '1px';
+        video.style.opacity = '0';
+
+        let done = false;
+
+        const cleanup = () => {
+            try {
+                video.removeAttribute('src');
+                video.load();
+            } catch { /* ignore */ }
+            if (video.parentNode) video.parentNode.removeChild(video);
+        };
+        const fail = (err) => {
+            if (done) return;
+            done = true;
+            cleanup();
+            reject(err || new Error('Video thumb failed'));
+        };
+        const succeed = (dataUrl) => {
+            if (done) return;
+            done = true;
+            cleanup();
+            resolve({ kind: 'image', src: dataUrl });
+        };
+
+        video.addEventListener('loadedmetadata', () => {
+            // Seek to early (but not 0) so we skip black opening frames.
+            const seekTo = Math.min(1, (video.duration || 4) / 4);
+            try {
+                video.currentTime = seekTo;
+            } catch (err) {
+                fail(err);
+            }
+        });
+
+        video.addEventListener('seeked', () => {
+            try {
+                const target = 80;
+                const vw = video.videoWidth || 1;
+                const vh = video.videoHeight || 1;
+                // Cover-fit: scale so the smaller side fills, crop the rest.
+                const scale = Math.max(target / vw, target / vh);
+                const dw = vw * scale;
+                const dh = vh * scale;
+                const canvas = document.createElement('canvas');
+                canvas.width = target;
+                canvas.height = target;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, target, target);
+                ctx.drawImage(video, (target - dw) / 2, (target - dh) / 2, dw, dh);
+                succeed(canvas.toDataURL('image/jpeg', 0.72));
+            } catch (err) {
+                fail(err);
+            }
+        });
+
+        video.addEventListener('error', () => fail(new Error('Video load error')));
+
+        // Append + assign src last so all listeners are wired first.
+        document.body.appendChild(video);
+        video.src = 'file:///' + filePath.replace(/\\/g, '/');
+
+        // Safety net — never block the page forever on a bad file.
+        setTimeout(() => fail(new Error('Video thumb timeout')), 10000);
+    });
+}
+
+// Lazy thumbnail loader for an expanded drive item's file rows.
+// Walks every .drive-item-file in the item, maps it to the drive's
+// files[] by data-file-index, and asks main for a thumbnail. Images use
+// a direct file:// URL; everything else gets the OS-native icon.
+// Cached per-path so re-expanding the same drive is instant.
+async function loadFileThumbnails(driveId) {
+    const item = driveItems.get(driveId);
+    const itemEl = item && item._element;
+    const drive = drives.find(d => d.id === driveId);
+    if (!itemEl || !drive || !Array.isArray(drive.files)) return;
+
+    const rows = itemEl.querySelectorAll('.drive-item-file');
+    rows.forEach((row) => {
+        if (row.dataset.thumbLoaded === 'done' || row.dataset.thumbLoaded === 'pending') {
+            return;
+        }
+        const idx = parseInt(row.dataset.fileIndex, 10);
+        const file = drive.files[idx];
+        const filePath = file && file.path;
+        if (!filePath) return; // no path → keep emoji fallback
+
+        const thumbEl = row.querySelector('.drive-item-file-thumb');
+        if (!thumbEl) return;
+
+        // Cached? Apply immediately.
+        if (fileThumbnailCache.has(filePath)) {
+            applyThumbnail(thumbEl, fileThumbnailCache.get(filePath));
+            row.dataset.thumbLoaded = 'done';
+            return;
+        }
+
+        // Inflight? Reuse the pending promise so we don't spam IPCs.
+        let promise = fileThumbnailPending.get(filePath);
+        if (!promise) {
+            const isVideo = VIDEO_EXTS.has(getFileExt(file.name));
+            // Videos: try real frame extraction first; on any failure
+            // (unsupported codec, broken file, timeout), fall through to
+            // the IPC which returns the OS-native icon.
+            const fetcher = isVideo
+                ? generateVideoThumb(filePath).catch(() =>
+                    window.electronAPI.getFileThumbnail(filePath)
+                  )
+                : window.electronAPI.getFileThumbnail(filePath);
+
+            promise = fetcher
+                .then((result) => {
+                    const value = result || { kind: 'none', src: null };
+                    fileThumbnailCache.set(filePath, value);
+                    fileThumbnailPending.delete(filePath);
+                    return value;
+                })
+                .catch(() => {
+                    const value = { kind: 'none', src: null };
+                    fileThumbnailCache.set(filePath, value);
+                    fileThumbnailPending.delete(filePath);
+                    return value;
+                });
+            fileThumbnailPending.set(filePath, promise);
+        }
+
+        row.dataset.thumbLoaded = 'pending';
+        promise.then((value) => {
+            if (!document.body.contains(row)) return; // slot was removed
+            applyThumbnail(thumbEl, value);
+            row.dataset.thumbLoaded = 'done';
+        });
+    });
+}
+
+// Fetch and apply the thumbnail to a single-file drive's main thumb slot.
+// Re-uses the same cache + video extraction as the expanded file list.
+// The lib renders <img> when data.thumbnail is set, so we just need to push
+// the resolved src through updateDriveInList.
+async function loadSingleFileThumbnail(driveId) {
+    if (singleFileDriveThumbsLoaded.has(driveId)) return;
+
+    const drive = drives.find(d => d.id === driveId);
+    if (!drive) return;
+    if (!Array.isArray(drive.files) || drive.files.length !== 1) return;
+
+    const file = drive.files[0];
+    if (!file || !file.path) return; // No path yet — drives-updated 'added' will retry
+
+    singleFileDriveThumbsLoaded.add(driveId);
+
+    let value;
+    try {
+        if (fileThumbnailCache.has(file.path)) {
+            value = fileThumbnailCache.get(file.path);
+        } else {
+            const isVideo = VIDEO_EXTS.has(getFileExt(file.name));
+            const fetcher = isVideo
+                ? generateVideoThumb(file.path).catch(() =>
+                    window.electronAPI.getFileThumbnail(file.path)
+                  )
+                : window.electronAPI.getFileThumbnail(file.path);
+            value = await fetcher;
+            fileThumbnailCache.set(file.path, value || { kind: 'none', src: null });
+        }
+    } catch {
+        return; // silent fail — emoji fallback stays
+    }
+
+    if (!value || !value.src) return;
+
+    // Inject into the drive's data — lib re-renders the thumb slot.
+    updateDriveInList({ id: driveId, thumbnail: value.src });
+}
+
+// For multi-file ("group") drives: composite a stacked-card effect using up to
+// the first 3 files' thumbnails — back layers peek behind the front, the way
+// iOS folder/album icons render collections. A count pill in the corner shows
+// the total. Far more recognizably "a collection" than a single thumb.
+async function loadGroupThumbnail(driveId) {
+    if (groupDriveThumbsLoaded.has(driveId)) return;
+
+    const drive = drives.find(d => d.id === driveId);
+    if (!drive) return;
+    if (!Array.isArray(drive.files) || drive.files.length < 2) return;
+
+    const first = drive.files[0];
+    if (!first || !first.path) return; // path not ready — retry later
+
+    groupDriveThumbsLoaded.add(driveId);
+
+    // Fetch up to 3 file thumbnails in parallel (reusing the per-file cache).
+    const sourceFiles = drive.files.slice(0, 3);
+    const thumbs = await Promise.all(sourceFiles.map(async (file) => {
+        if (!file || !file.path) return null;
+        if (fileThumbnailCache.has(file.path)) return fileThumbnailCache.get(file.path);
+        try {
+            const isVideo = VIDEO_EXTS.has(getFileExt(file.name));
+            const value = isVideo
+                ? await generateVideoThumb(file.path).catch(() =>
+                    window.electronAPI.getFileThumbnail(file.path)
+                  )
+                : await window.electronAPI.getFileThumbnail(file.path);
+            fileThumbnailCache.set(file.path, value || { kind: 'none', src: null });
+            return value;
+        } catch {
+            return null;
+        }
+    }));
+
+    // Load each into an <img> so we can drawImage to canvas.
+    const loadedImages = await Promise.all(thumbs.map((t) => {
+        if (!t || !t.src) return null;
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = t.src;
+        });
+    }));
+
+    // Composite onto a 80x80 canvas (2x retina for the 40x40 display).
+    const target = 80;
+    const canvas = document.createElement('canvas');
+    canvas.width = target;
+    canvas.height = target;
+    const ctx = canvas.getContext('2d');
+
+    // ---- Stack geometry ----
+    // The card stack centers in the canvas and "fans" from top-left (back)
+    // to bottom-right (front). Cards are square with rounded corners.
+    const cardSize = 54;
+    const cornerR = 7;
+    const stackOffset = 6;
+    const usable = loadedImages.filter(Boolean).length;
+    const layers = Math.min(usable, 3) || 1;
+
+    // Center the entire stack inside the canvas
+    const stackSpan = (layers - 1) * stackOffset;
+    const baseX = (target - cardSize - stackSpan) / 2;
+    const baseY = (target - cardSize - stackSpan) / 2;
+
+    // Draw from BACK to FRONT so layers stack correctly.
+    for (let i = layers - 1; i >= 0; i--) {
+        const x = baseX + i * stackOffset;
+        const y = baseY + i * stackOffset;
+        const img = loadedImages[i];
+
+        // Soft outer shadow ring for separation between stacked cards
+        ctx.save();
+        roundedRectPath(ctx, x - 1, y - 1, cardSize + 2, cardSize + 2, cornerR + 1);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fill();
+        ctx.restore();
+
+        // Card background (in case the image is small / fails)
+        ctx.save();
+        roundedRectPath(ctx, x, y, cardSize, cardSize, cornerR);
+        ctx.fillStyle = '#1c1c20';
+        ctx.fill();
+        ctx.restore();
+
+        // Clip the image to the rounded card bounds
+        ctx.save();
+        roundedRectPath(ctx, x, y, cardSize, cardSize, cornerR);
+        ctx.clip();
+        if (img) {
+            const scale = Math.max(cardSize / img.width, cardSize / img.height);
+            const dw = img.width * scale;
+            const dh = img.height * scale;
+            ctx.drawImage(img, x + (cardSize - dw) / 2, y + (cardSize - dh) / 2, dw, dh);
+        }
+        ctx.restore();
+
+        // Subtle hairline border for crispness
+        ctx.save();
+        roundedRectPath(ctx, x + 0.5, y + 0.5, cardSize - 1, cardSize - 1, cornerR - 0.5);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // ---- Count badge: rounded pill, bottom-right ----
+    const count = drive.files.length;
+    const badgeText = String(count);
+    ctx.font = 'bold 18px -apple-system, "SF Pro Display", "Segoe UI", sans-serif';
+    const textW = ctx.measureText(badgeText).width;
+    const padX = 7;
+    const badgeH = 22;
+    const badgeW = Math.max(badgeH, textW + padX * 2);
+    const badgeX = target - badgeW - 3;
+    const badgeY = target - badgeH - 3;
+    const bR = badgeH / 2;
+
+    // Outer ring (softens against thumbnail content behind)
+    ctx.save();
+    roundedRectPath(ctx, badgeX - 1, badgeY - 1, badgeW + 2, badgeH + 2, bR + 1);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fill();
+    ctx.restore();
+
+    // Pill
+    ctx.save();
+    roundedRectPath(ctx, badgeX, badgeY, badgeW, badgeH, bR);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(badgeText, badgeX + badgeW / 2, badgeY + badgeH / 2);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    updateDriveInList({ id: driveId, thumbnail: dataUrl });
+}
+
+// Helper: trace a rounded rectangle path (caller decides fill / stroke / clip).
+function roundedRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+// Swap the emoji placeholder inside a thumb span for the resolved image / icon.
+// `none` leaves the existing emoji as-is.
+function applyThumbnail(thumbEl, value) {
+    if (!value || !value.src) return;
+    const img = document.createElement('img');
+    img.src = value.src;
+    img.alt = '';
+    img.draggable = false;
+    thumbEl.innerHTML = '';
+    thumbEl.appendChild(img);
 }
 
 function getFileIcon(filename) {

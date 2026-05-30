@@ -30,6 +30,10 @@
  *     - 'open-file' - Open file in default application
  *     - 'show-file-in-folder' - Reveal file in Finder/Explorer
  *     - 'get-files-stats' - Get file/folder stats with folder expansion
+ *     - 'generate-qr' - Generate QR data URL for a string
+ *     - 'get-app-version' - App version (reset-notice gating)
+ *     - 'check-legacy-data-present' - Detect pre-unified state files
+ *     - 'get-file-thumbnail' - Image src or OS-native icon for a file
  *     - 'get-debug' - Get current debug state
  *     - 'set-debug' - Set debug state (persists to config)
  * 
@@ -646,6 +650,38 @@ function setupIPC() {
     // ========================================================================
     ipcMain.handle('get-app-version', async () => {
         return app.getVersion();
+    });
+
+    // ========================================================================
+    // File thumbnail — lazy thumbnail provider for the expanded drive items.
+    //   * Images → return the file:// URL directly so the renderer can <img>
+    //     it. No file read, no encoding, instant.
+    //   * Anything else → app.getFileIcon returns the OS-native icon
+    //     (Mac/Win/Linux). Encoded as data: URL.
+    //   * Failures → return { kind: 'none' } so the renderer keeps the
+    //     emoji fallback.
+    // ========================================================================
+    ipcMain.handle('get-file-thumbnail', async (event, payload) => {
+        const filePath = payload && payload.path;
+        try {
+            if (!filePath) return { kind: 'none', src: null };
+
+            const ext = path.extname(filePath).toLowerCase();
+            const imageExts = new Set([
+                '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico', '.apng'
+            ]);
+
+            if (imageExts.has(ext)) {
+                // Electron renderers can load file:// URLs directly into <img>
+                const url = 'file:///' + filePath.replace(/\\/g, '/');
+                return { kind: 'image', src: url };
+            }
+
+            const icon = await app.getFileIcon(filePath, { size: 'normal' });
+            return { kind: 'icon', src: icon.toDataURL() };
+        } catch (error) {
+            return { kind: 'none', src: null, error: error.message };
+        }
     });
 
     // ========================================================================

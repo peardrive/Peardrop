@@ -26,7 +26,11 @@
  *       - openFile(filePath) - Open file in default app
  *       - showFileInFolder(filePath) - Show file in Finder/Explorer
  *       - getFilesStats(paths) - Get file/folder stats
- *     
+ *       - generateQr(text) - Generate QR data URL for a string
+ *       - getAppVersion() - Get app version (for reset notice gating)
+ *       - checkLegacyDataPresent() - Detect pre-unified state files
+ *       - getFileThumbnail(filePath) - Image src or OS icon for a file
+ *
  *     Debug:
  *       - getDebug() - Get current debug state
  *       - setDebug(enabled) - Set debug state (persists to config)
@@ -86,6 +90,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // ========================================================================
     getAppVersion: () => ipcRenderer.invoke('get-app-version'),
     checkLegacyDataPresent: () => ipcRenderer.invoke('check-legacy-data-present'),
+
+    // ========================================================================
+    // File thumbnails — used by the expanded drive-item file list.
+    // ========================================================================
+    getFileThumbnail: (filePath) => ipcRenderer.invoke('get-file-thumbnail', { path: filePath }),
 
     // ========================================================================
     // Debug Control
