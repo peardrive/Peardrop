@@ -43,6 +43,7 @@
  *     - onUploadComplete(cb) - Transfer complete
  *     - onDownloadProgress(cb) - Download progress
  *     - onDownloadPeerDisconnected(cb) - Sender went offline
+ *     - onDriveReadyToDownload(cb) - Resumed drive ready to continue download
  *     - onDrivesUpdated(cb) - Drive added/removed/updated
  * 
  * EXTERNAL CALLS: Electron contextBridge, ipcRenderer
@@ -112,5 +113,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onUploadComplete: (callback) => ipcRenderer.on('upload-complete', callback),
     onDownloadProgress: (callback) => ipcRenderer.on('download-progress', callback),
     onDownloadPeerDisconnected: (callback) => ipcRenderer.on('download-peer-disconnected', callback),
+    onDriveReadyToDownload: (callback) => ipcRenderer.on('drive-ready-to-download', callback),
     onDrivesUpdated: (callback) => ipcRenderer.on('drives-updated', callback)
 });

@@ -261,7 +261,10 @@ function init() {
 function getPresetForDrive(drive) {
     // Determine base preset type
     if (drive.progress != null && drive.progress < 1) {
-        // Active download
+        // Active download with progress
+        return isExpandedView ? 'download' : 'downloadCompact';
+    } else if (drive.state === 'seeking') {
+        // Seeking downloads (connecting to peers)
         return isExpandedView ? 'download' : 'downloadCompact';
     } else if (drive.type === 'upload' || drive.type === 'share' || drive.status === 'sharing') {
         // Share/upload
@@ -1127,6 +1130,22 @@ function bindIPC() {
             });
             showToast('Download complete!', 'success');
         }
+    });
+    
+    // Resumed drive ready to download - trigger download for interrupted transfers
+    window.electronAPI.onDriveReadyToDownload?.((event, data) => {
+        const { driveId, shareLink, shareName } = data;
+        console.log('[PearDrop] Drive ready to download, resuming:', driveId);
+        
+        // Update drive display to show downloading state
+        updateDriveInList({
+            id: driveId,
+            status: 'downloading',
+            title: shareName || 'Download'
+        });
+        
+        // Trigger download using the same path as new downloads
+        handleDownload(driveId, shareLink);
     });
     
     // Drives updated (from HyperdriveManager)

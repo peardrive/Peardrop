@@ -1197,6 +1197,13 @@ app.whenReady().then(async () => {
             }
         });
         
+        // Drive ready to download - resumed drive connected and ready to continue
+        hyperdriveManager.on('drive-ready-to-download', (data) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('drive-ready-to-download', data);
+            }
+        });
+        
         console.log('[PearDrop] Ready');
         
     } catch (error) {
