@@ -1236,10 +1236,26 @@ app.on('activate', () => {
     }
 });
 
-app.on('before-quit', async () => {
-    try {
-        await hyperdriveManager.stopAll({ delete: false });
-    } catch (error) {
-        console.error('[PearDrop] Cleanup error:', error);
-    }
+// Electron does NOT await async before-quit handlers, so a naive `await` here
+// races the process exit and can leave corestores half-closed (lock files,
+// partial writes). Instead: cancel the first quit, run cleanup to completion,
+// then re-issue the quit — guarded so we only intercept once.
+let cleanupDone = false;
+let cleanupInProgress = false;
+app.on('before-quit', (event) => {
+    if (cleanupDone) return; // second pass: let the real quit proceed
+    event.preventDefault();
+    if (cleanupInProgress) return;
+    cleanupInProgress = true;
+    (async () => {
+        try {
+            await hyperdriveManager.stopAll({ delete: false });
+            console.log('[PearDrop] Drives closed cleanly on quit');
+        } catch (error) {
+            console.error('[PearDrop] Cleanup error:', error);
+        } finally {
+            cleanupDone = true;
+            app.quit();
+        }
+    })();
 });
