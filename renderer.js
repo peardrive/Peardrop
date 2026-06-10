@@ -423,15 +423,19 @@ function bindQrUpload() {
 }
 
 function handleScannedLink(text) {
-    if (!text.startsWith('peardrop://')) {
+    const link = (text || '').trim();
+    if (!link.startsWith('peardrop://')) {
         showToast('QR doesn\'t contain a PearDrop link', 'error');
         return;
     }
-    linkInput.value = text;
+    linkInput.value = link;
     linkInput.classList.add('flash');
     setTimeout(() => linkInput.classList.remove('flash'), 500);
-    showToast('Link captured', 'success');
-    //startDownload(); // a plan for later on
+    // QR scanning is a "retrieve" action — fetch immediately rather than just
+    // populating the field. startDownload() validates the key and is a no-op if
+    // it's already in flight / a duplicate.
+    showToast('Link captured — starting download', 'success');
+    startDownload();
 }
 
 async function startShare() {
@@ -1726,6 +1730,11 @@ function showToast(message, type = 'info') {
         toast.classList.remove('visible');
     }, 3000);
 }
+
+// Expose for components loaded as browser globals (e.g. qr-scanner.js calls
+// window.showToast on image-decode failure). Without this the scanner's error
+// feedback was silently dropped.
+window.showToast = showToast;
 
 // ============================================================================
 // PROFILE & LIST MENU
