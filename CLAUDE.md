@@ -97,46 +97,38 @@ See `~/Projects/ENGINEERING-PRINCIPLES.md` for full philosophy.
 
 ## 🎨 UNIFIED PROGRESS UI
 
-**ONE structure for ALL transfers** - uploads and downloads use identical HTML.
+> ⚠️ UPDATED 2026-06-10 — this section previously documented `transfer-ui.js` /
+> `updateTransferUI` / `updateDownloadUI` and a `.progress-bar` > (no fill)
+> structure. **That code no longer exists.** All transfer rendering now lives in
+> ONE component: `lib/drive-item/drive-item.js` (`DriveItem`). The "one structure
+> for all transfers" principle is preserved — but by a single component, not
+> shared HTML helpers. Use the real markup below.
 
-### Progress Bar (correct):
+**ONE component renders ALL transfers** — `DriveItem._buildContentHTML()` handles
+uploads (shares) and downloads. There is no second renderer, so it cannot diverge
+the way the v0.14.1 incident did (see Lessons Learned below).
+
+### Actual progress markup (emitted by DriveItem):
 ```html
-<div class="transfer-progress">
-    <div class="progress-bar" style="width: 72%"></div>
+<div class="drive-item-progress">
+    <div class="drive-item-progress-bar">
+        <div class="drive-item-progress-fill" style="width: 72%"></div>
+    </div>
 </div>
 ```
 
-### Stats Line (correct):
-```html
-<div class="transfer-stats">
-    <span class="transfer-bytes">72 MB / 452 MB</span>
-    <span class="transfer-percent">72%</span>
-</div>
-```
+### Key CSS classes (all `drive-item-*`, defined in drive-item.js `_injectStyles`):
+- `.drive-item-progress-bar` - track
+- `.drive-item-progress-fill` - gets `width: X%`, gradient
+- `.drive-item-meta` / `.drive-item-meta-item` - size • files • % • speed row
+- `.drive-item-peers` / `.drive-item-peers-dot[.offline]` - peer indicator
 
-### ❌ WRONG - Don't do this:
-```html
-<!-- DON'T nest progress-fill inside progress-bar -->
-<div class="progress-bar">
-    <div class="progress-fill" style="width: 72%"></div>
-</div>
-
-<!-- DON'T use unstyled containers -->
-<div class="transfer-stats">
-    <span>72 MB / 452 MB</span>  <!-- missing class! -->
-</div>
-```
-
-### Key CSS Classes:
-- `.progress-bar` - Gets width %, has gradient background
-- `.transfer-stats` / `.transfer-footer` - Flex container, space-between
-- `.transfer-bytes` - 10px, 50% white
-- `.transfer-percent` - 10px, 70% white, bold
-
-### Update Functions:
-- `updateTransferUI(peerId, peer)` - For uploads
-- `updateDownloadUI(driveId, download)` - For downloads
-- Both use identical selectors: `.progress-bar`, `.transfer-bytes`, `.transfer-percent`
+### Rule (still in force):
+There must remain exactly ONE place that renders a transfer row. If you need a
+transfer rendered somewhere new, reuse `DriveItem` — do NOT hand-roll a second
+progress bar. Shared pure helpers (formatBytes/getFileIcon/escapeHtml) are
+currently duplicated across drive-item/drive-info-panel/renderer — consolidating
+them is a known TODO; don't add a 5th copy.
 
 ---
 
@@ -227,29 +219,33 @@ peardrop stop    # stop all shares
 ├── bin/peardrop               # CLI tool
 ├── CHANGELOG.md               # Version history
 └── lib/
-    ├── hyperdrive-manager.js  # 🔒 SACRED: Drive lifecycle, swarm, P2P
-    ├── drive-manager.js       # ✅ SAFE: Single source of truth for all drives
-    ├── downloader.js          # ✅ SAFE: Download orchestration
-    ├── file-utils.js          # ✅ SAFE: Pure file utilities
+    ├── hyperdrive-manager.js  # 🔒 SACRED: Drive lifecycle, swarm, P2P + state
+    ├── manifest-recovery.js   # ✅ SAFE: Robust drives-state.json load/recovery
+    ├── downloader.js          # ✅ SAFE: Download orchestration (safeJoin-guarded)
     ├── progress-tracker.js    # Upload tracking, events
-    └── transfer-ui.js         # ✅ SAFE: Reusable UI components (progress bars)
+    ├── file-utils.js          # ✅ SAFE: Pure file utilities (incl. safeJoin)
+    ├── drive-actions.js       # ✅ SAFE: menu action -> IPC adapter (renderer)
+    ├── scroll-list/           # ✅ SAFE: list container (browser global)
+    ├── drive-item/            # ✅ SAFE: transfer-row + info-panel (browser global)
+    ├── qr-scanner/            # ✅ SAFE: QR generate/scan (browser global)
+    ├── migration.js           # legacy import (disabled), logger.js
+    └── _graveyard/            # ☠️ DEAD — quarantined, not loaded (safe to delete)
 ```
 
-### DriveManager (v0.17.0) - Single Source of Truth
+### Single Source of Truth (corrected 2026-06-10)
 
-**File:** `~/peardrop/drives.json`
+> ⚠️ The old `drive-manager.js` / `~/peardrop/drives.json` "DriveManager" no
+> longer exists — `drive-manager.js` is in `_graveyard/` (`.removed`). Do not
+> reintroduce it. The live source of truth is below.
 
-**API:**
-- `add(drive)` - Add a new drive (upload or download)
-- `remove(id, opts)` - Remove completely (storage + optional files)
-- `pause(id)` - Stop seeding, keep data
-- `resume(id)` - Resume seeding
-- `get(id)` / `getAll()` / `getByKey(key)` - Queries
+**Owner:** `HyperdriveManager` (`lib/hyperdrive-manager.js`).
+**File:** `~/peardrop/drives-state.json` — written atomically (temp + rename) by
+`_saveManifest()`, loaded via `ManifestRecovery.loadWithRecovery()`.
+**Wire manifest (separate, legitimate):** `/.peardrop.json` inside each drive —
+the P2P metadata a receiver reads (file names/sizes). Distinct from local state.
 
-**States:**
-- `active` - Currently seeding/available on network
-- `paused` - Not seeding, but can resume
-- `local` - Only local files exist (no hyperdrive data)
+**Drive states** (`DriveState` in hyperdrive-manager.js): `creating`, `active`,
+`paused`, `seeking` (download in progress / awaiting peer), `errored`.
 
 **Rule:** If it's in the Shares list → it exists. Remove from list → completely deleted.
 
