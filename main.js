@@ -1147,20 +1147,7 @@ app.whenReady().then(async () => {
         // This ensures we don't start network activity with corrupted data
         await checkForOrphanedDrives();
         
-        // Initialize Hyperdrive manager with clean, accurate manifest
-        await hyperdriveManager.init();
-        
-        // Notify frontend that drives have been loaded (especially after migration)
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            const drives = hyperdriveManager.getAllDriveEntries();
-            mainWindow.webContents.send('drives-updated', {
-                action: 'loaded',
-                drives: drives
-            });
-            console.log('[PearDrop] Notified frontend of loaded drives:', drives.length);
-        }
-        
-        // Forward progress events to renderer
+        // Set up event listeners BEFORE init() so we catch events during drive resume
         hyperdriveManager.on('peer-connected', (data) => {
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('peer-connected', data);
@@ -1174,6 +1161,7 @@ app.whenReady().then(async () => {
         });
         
         hyperdriveManager.on('upload-progress', (data) => {
+            console.log('[Main] Received upload-progress from hyperdriveManager:', data);
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('upload-progress', {
                     ...data,
@@ -1199,10 +1187,24 @@ app.whenReady().then(async () => {
         
         // Drive ready to download - resumed drive connected and ready to continue
         hyperdriveManager.on('drive-ready-to-download', (data) => {
+            console.log('[PearDrop] Received drive-ready-to-download event, forwarding to renderer', { driveId: data.driveId });
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('drive-ready-to-download', data);
             }
         });
+        
+        // Initialize Hyperdrive manager with clean, accurate manifest (after event listeners are set up)
+        await hyperdriveManager.init();
+        
+        // Notify frontend that drives have been loaded (especially after migration)
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            const drives = hyperdriveManager.getAllDriveEntries();
+            mainWindow.webContents.send('drives-updated', {
+                action: 'loaded',
+                drives: drives
+            });
+            console.log('[PearDrop] Notified frontend of loaded drives:', drives.length);
+        }
         
         console.log('[PearDrop] Ready');
         

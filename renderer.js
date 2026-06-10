@@ -86,6 +86,8 @@ let currentDriveId = null;      // Active drive ID
 let drives = [];                // All drives from HyperdriveManager
 let driveItems = new Map();     // driveId -> DriveItem instance
 let scrollList = null;          // ScrollList instance
+// Upload aggregation: driveId -> { peers: Set<peerId>, totalSpeed: number, lastUpdate: timestamp }
+let uploadTracking = new Map();
 
 // Sort state
 let sortField = 'recent';       // recent | status | size | custom
@@ -1055,6 +1057,50 @@ function normalizeDrive(drive) {
 }
 
 // ============================================================================
+// UPLOAD AGGREGATION
+// ============================================================================
+
+/**
+ * Aggregate upload data from multiple peers for cleaner display
+ * @param {string} driveId - Drive being uploaded from
+ * @param {string} peerId - Peer downloading 
+ * @param {Object} data - Progress data with speed, percent, etc.
+ */
+function updateUploadAggregation(driveId, peerId, data) {
+    console.log('[Renderer] updateUploadAggregation called:', { driveId, peerId, data });
+    const item = driveItems.get(driveId);
+    if (!item) return;
+    
+    // Get or create aggregation for this drive
+    if (!uploadTracking.has(driveId)) {
+        uploadTracking.set(driveId, {
+            peers: new Set(),
+            totalSpeed: 0,
+            lastUpdate: Date.now()
+        });
+    }
+    
+    const tracking = uploadTracking.get(driveId);
+    const speed = parseSpeed(data.speedFormatted);
+    
+    // Add this peer and update total speed
+    tracking.peers.add(peerId);
+    tracking.totalSpeed = speed; // For now, use latest speed (could sum all peers later)
+    tracking.lastUpdate = Date.now();
+    
+    // Update UI with aggregated data
+    const peerCount = tracking.peers.size;
+    const displayStatus = peerCount > 0 ? 'sharing' : 'complete';
+    
+    item.update({ 
+        status: displayStatus,
+        speed: tracking.totalSpeed,
+        peers: peerCount,
+        uploadText: peerCount > 0 ? `${peerCount} peer${peerCount > 1 ? 's' : ''} downloading` : null
+    });
+}
+
+// ============================================================================
 // IPC EVENT HANDLERS
 // ============================================================================
 
@@ -1074,12 +1120,34 @@ function bindIPC() {
     
     window.electronAPI.onPeerDisconnected?.((event, data) => {
         const driveId = data.driveId;
+        const peerId = data.peerId;
         const item = driveItems.get(driveId);
         if (item) {
             const drive = drives.find(d => d.id === driveId);
             if (drive && drive.peers > 0) {
                 drive.peers--;
                 item.update({ peers: drive.peers });
+            }
+            
+            // Clean up upload aggregation tracking
+            if (uploadTracking.has(driveId) && peerId) {
+                const tracking = uploadTracking.get(driveId);
+                tracking.peers.delete(peerId);
+                
+                // Update UI if no more active uploaders
+                if (tracking.peers.size === 0) {
+                    item.update({ 
+                        status: 'complete',
+                        speed: 0,
+                        uploadText: null
+                    });
+                } else {
+                    // Update peer count
+                    item.update({ 
+                        peers: tracking.peers.size,
+                        uploadText: `${tracking.peers.size} peer${tracking.peers.size > 1 ? 's' : ''} downloading`
+                    });
+                }
             }
         }
     });
@@ -1088,6 +1156,7 @@ function bindIPC() {
     // Data format from downloader: { driveId, peerId, percent, bytesFormatted, totalFormatted, speedFormatted }
     window.electronAPI.onUploadProgress?.((event, data) => {
         log('Progress event:', data);
+        console.log('[Renderer] Received upload-progress event:', data);
         const { driveId, peerId, percent, speedFormatted } = data;
         const item = driveItems.get(driveId);
         if (!item) {
@@ -1109,12 +1178,8 @@ function bindIPC() {
                 speed: speed
             });
         } else {
-            // This is an upload (someone downloading from us)
-            const speed = parseSpeed(speedFormatted);
-            item.update({ 
-                status: 'sharing',
-                speed: speed
-            });
+            // This is an upload (someone downloading from us) - aggregate peer data
+            updateUploadAggregation(driveId, peerId, data);
         }
     });
     
@@ -1135,7 +1200,7 @@ function bindIPC() {
     // Resumed drive ready to download - trigger download for interrupted transfers
     window.electronAPI.onDriveReadyToDownload?.((event, data) => {
         const { driveId, shareLink, shareName } = data;
-        console.log('[PearDrop] Drive ready to download, resuming:', driveId);
+        console.log('[PearDrop] Renderer received drive-ready-to-download event:', { driveId, shareLink, shareName });
         
         // Update drive display to show downloading state
         updateDriveInList({
@@ -1145,6 +1210,7 @@ function bindIPC() {
         });
         
         // Trigger download using the same path as new downloads
+        console.log('[PearDrop] Triggering handleDownload for resumed drive:', driveId);
         handleDownload(driveId, shareLink);
     });
     
