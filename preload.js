@@ -7,24 +7,21 @@
  *   INVOKE (renderer -> main):
  *     Hyperdrive:
  *       - hyperdriveShare(data) - Create share from files
- *       - hyperdriveStop(data) - Stop sharing
+ *       - hyperdriveCheckDuplicate(data) - Fast local duplicate check
  *       - hyperdriveOpen(data) - Open remote drive
  *       - hyperdriveDownload(data) - Download from opened drive
- *       - hyperdriveAbort(data) - Abort pending connection
- *       - hyperdriveStatus() - Get drive stats
- *     
- *     HyperdriveManager (single source of truth):
+ *
+ *     Drive list (HyperdriveManager + drives-state.json):
  *       - drivesList() - Get all drives
  *       - drivesPause(data) - Pause seeding (keep data)
  *       - drivesResume(data) - Resume seeding
  *       - drivesRemove(data) - Remove drive completely
- *       - drivesCheckFiles() - Check local file availability
- *       - driveGet(id) - Get drive info by ID
- *     
+ *
  *     Utilities:
  *       - openDownloads() - Open downloads folder
  *       - openFile(filePath) - Open file in default app
  *       - showFileInFolder(filePath) - Show file in Finder/Explorer
+ *       - driveGet(id) - Get single drive by ID (drive-actions open/show)
  *       - getFilesStats(paths) - Get file/folder stats
  *       - generateQr(text) - Generate QR data URL for a string
  *       - getAppVersion() - Get app version (for reset notice gating)
@@ -41,7 +38,6 @@
  *     - onPeerDisconnected(cb) - Peer left
  *     - onUploadProgress(cb) - Transfer progress
  *     - onUploadComplete(cb) - Transfer complete
- *     - onDownloadProgress(cb) - Download progress
  *     - onDownloadPeerDisconnected(cb) - Sender went offline
  *     - onDriveReadyToDownload(cb) - Resumed drive ready to continue download
  *     - onDrivesUpdated(cb) - Drive added/removed/updated
@@ -55,13 +51,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Hyperdrive operations
     // ========================================================================
     hyperdriveShare: (data) => ipcRenderer.invoke('hyperdrive-share', data),
-    hyperdriveStop: (data) => ipcRenderer.invoke('hyperdrive-stop', data),
     hyperdriveCheckDuplicate: (data) => ipcRenderer.invoke('hyperdrive-check-duplicate', data),
     hyperdriveOpen: (data) => ipcRenderer.invoke('hyperdrive-open', data),
     hyperdriveDownload: (data) => ipcRenderer.invoke('hyperdrive-download', data),
-    hyperdriveAbort: (data) => ipcRenderer.invoke('hyperdrive-abort', data || {}),
-    hyperdriveStatus: () => ipcRenderer.invoke('hyperdrive-status'),
-    
+
     // ========================================================================
     // HyperdriveManager - Single source of truth for Shares tab
     // ========================================================================
@@ -69,8 +62,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     drivesPause: (data) => ipcRenderer.invoke('drives-pause', data),
     drivesResume: (data) => ipcRenderer.invoke('drives-resume', data),
     drivesRemove: (data) => ipcRenderer.invoke('drives-remove', data),
-    drivesCheckFiles: () => ipcRenderer.invoke('drives-check-files'),
-    
+
     // ========================================================================
     // Utilities
     // ========================================================================
@@ -111,7 +103,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onPeerDisconnected: (callback) => ipcRenderer.on('peer-disconnected', callback),
     onUploadProgress: (callback) => ipcRenderer.on('upload-progress', callback),
     onUploadComplete: (callback) => ipcRenderer.on('upload-complete', callback),
-    onDownloadProgress: (callback) => ipcRenderer.on('download-progress', callback),
     onDownloadPeerDisconnected: (callback) => ipcRenderer.on('download-peer-disconnected', callback),
     onDriveReadyToDownload: (callback) => ipcRenderer.on('drive-ready-to-download', callback),
     onDrivesUpdated: (callback) => ipcRenderer.on('drives-updated', callback)

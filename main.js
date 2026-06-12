@@ -13,18 +13,15 @@
  * IPC HANDLERS (renderer can invoke):
  *   Hyperdrive:
  *     - 'hyperdrive-share' - Create share from files, returns link
- *     - 'hyperdrive-stop' - Stop sharing a drive
+ *     - 'hyperdrive-check-duplicate' - Fast local duplicate check
  *     - 'hyperdrive-open' - Connect to remote drive (includes dedup check)
- *     - 'hyperdrive-abort' - Abort pending connection(s)
  *     - 'hyperdrive-download' - Download files from opened drive
- *     - 'hyperdrive-status' - Get active/stopped drives stats
  *   HyperdriveManager (UI Interface):
+ *     - 'drive-get' - Get single drive by ID
  *     - 'drives-list' - Get all tracked drives
  *     - 'drives-pause' - Pause seeding (keep data)
  *     - 'drives-resume' - Resume seeding
  *     - 'drives-remove' - Delete drive completely
- *     - 'drives-check-files' - Verify local file availability
- *     - 'drive-get' - Get single drive by ID
  *   Utilities:
  *     - 'open-downloads' - Open downloads folder in Finder/Explorer
  *     - 'open-file' - Open file in default application
@@ -451,17 +448,6 @@ function setupIPC() {
         }
     });
 
-    // Stop sharing a drive
-    ipcMain.handle('hyperdrive-stop', async (event, { driveId, delete: deleteParam = false }) => {
-        try {
-            await hyperdriveManager.stopDrive(driveId, { delete: deleteParam });
-            console.log('[PearDrop] Share stopped:', driveId);
-            return { success: true };
-        } catch (error) {
-            return { success: false, error: error.message };
-        }
-    });
-
     // Quick local-only duplicate check (fast, no network)
     ipcMain.handle('hyperdrive-check-duplicate', async (event, { shareLink }) => {
         const driveKey = shareLink.replace('peardrop://', '').toLowerCase();
@@ -531,24 +517,6 @@ function setupIPC() {
             };
         } catch (error) {
             console.error('[PearDrop] Open failed:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    // Abort a pending connection
-    ipcMain.handle('hyperdrive-abort', async (event, { driveId }) => {
-        try {
-            if (driveId) {
-                const aborted = hyperdriveManager.abortConnection(driveId);
-                console.log('[PearDrop] Abort connection:', { driveId, aborted });
-                return { success: true, aborted };
-            } else {
-                hyperdriveManager.abortAllConnections();
-                console.log('[PearDrop] Aborted all pending connections');
-                return { success: true, aborted: true };
-            }
-        } catch (error) {
-            console.error('[PearDrop] Abort failed:', error);
             return { success: false, error: error.message };
         }
     });
@@ -654,15 +622,6 @@ function setupIPC() {
         }
     });
 
-    // Get status of all drives
-    ipcMain.handle('hyperdrive-status', async () => {
-        try {
-            return { success: true, ...hyperdriveManager.getStatus() };
-        } catch (error) {
-            return { success: false, error: error.message };
-        }
-    });
-
     // Open downloads folder
     ipcMain.handle('open-downloads', async () => {
         try {
@@ -703,7 +662,11 @@ function setupIPC() {
         }
     });
 
-    // Get drive info by ID
+    // ========================================================================
+    // Drive list — backed by HyperdriveManager + drives-state.json
+    // ========================================================================
+
+    // Get single drive by ID (used by drive-actions.js for open/show-in-folder)
     ipcMain.handle('drive-get', async (event, { id }) => {
         try {
             const drive = hyperdriveManager.getDriveEntry(id);
@@ -715,10 +678,6 @@ function setupIPC() {
             return { success: false, error: error.message };
         }
     });
-
-    // ========================================================================
-    // DriveManager - Single source of truth for all drives
-    // ========================================================================
 
     // Get all drives
     ipcMain.handle('drives-list', async () => {
@@ -804,26 +763,6 @@ function setupIPC() {
             return { success };
         } catch (error) {
             console.error('[PearDrop] Failed to remove drive:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    // Check local file availability for all drives
-    ipcMain.handle('drives-check-files', async () => {
-        try {
-            const drives = hyperdriveManager.getAllDriveEntries();
-            const results = [];
-            
-            for (const drive of drives) {
-                const available = await hyperdriveManager.checkLocalAvailability(drive.id);
-                if (available !== drive.isLocalAvailable) {
-                    await hyperdriveManager.updateDriveEntry(drive.id, { isLocalAvailable: available });
-                }
-                results.push({ ...drive, isLocalAvailable: available });
-            }
-            
-            return { success: true, drives: results };
-        } catch (error) {
             return { success: false, error: error.message };
         }
     });
