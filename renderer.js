@@ -1287,12 +1287,9 @@ function bindIPC() {
 // UTILITIES
 // ============================================================================
 
+// Shared formatting from lib/ui-utils.js (window.PearUtils, loaded first).
 function formatFileSize(bytes) {
-    if (bytes == null || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    return PearUtils.formatBytes(bytes);
 }
 
 // Parse speed string like "1.5 MB/s" back to bytes/sec
@@ -1683,23 +1680,7 @@ function applyThumbnail(thumbEl, value) {
 }
 
 function getFileIcon(filename) {
-    if (!filename) return '📄';
-    const ext = filename.split('.').pop()?.toLowerCase();
-    const icons = {
-        // Images
-        jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', webp: '🖼️', svg: '🖼️',
-        // Video
-        mp4: '🎬', mov: '🎬', avi: '🎬', mkv: '🎬', webm: '🎬',
-        // Audio
-        mp3: '🎵', wav: '🎵', ogg: '🎵', flac: '🎵', m4a: '🎵',
-        // Documents
-        pdf: '📕', doc: '📘', docx: '📘', txt: '📄', md: '📝',
-        // Archives
-        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
-        // Code
-        js: '⚙️', ts: '⚙️', py: '🐍', html: '🌐', css: '🎨', json: '📋'
-    };
-    return icons[ext] || '📄';
+    return PearUtils.getFileIcon(filename);
 }
 
 const TOAST_ICONS = {
