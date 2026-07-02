@@ -86,7 +86,8 @@ let currentDriveId = null;      // Active drive ID
 let drives = [];                // All drives from HyperdriveManager
 let driveItems = new Map();     // driveId -> DriveItem instance
 let scrollList = null;          // ScrollList instance
-// Upload aggregation: driveId -> { peers: Set<peerId>, totalSpeed: number, lastUpdate: timestamp }
+// Upload aggregation: driveId -> { peers: Set<peerId>, totalSpeed, lastUpdate, hadTransfer }
+// The Set<peerId> is the SINGLE source of truth for peer count; drive.peers mirrors it.
 let uploadTracking = new Map();
 
 // Sort state
@@ -1080,20 +1081,24 @@ function updateUploadAggregation(driveId, peerId, data) {
         uploadTracking.set(driveId, {
             peers: new Set(),
             totalSpeed: 0,
-            lastUpdate: Date.now()
+            lastUpdate: Date.now(),
+            hadTransfer: false
         });
     }
-    
+
     const tracking = uploadTracking.get(driveId);
     const speed = parseSpeed(data.speedFormatted);
-    
+
     // Add this peer and update total speed
     tracking.peers.add(peerId);
     tracking.totalSpeed = speed; // For now, use latest speed (could sum all peers later)
     tracking.lastUpdate = Date.now();
-    
+    tracking.hadTransfer = true;
+
     // Update UI with aggregated data
     const peerCount = tracking.peers.size;
+    const drive = drives.find(d => d.id === driveId);
+    if (drive) drive.peers = peerCount; // keep derived mirror in sync
     const displayStatus = peerCount > 0 ? 'sharing' : 'complete';
     
     item.update({ 
@@ -1109,50 +1114,57 @@ function updateUploadAggregation(driveId, peerId, data) {
 // ============================================================================
 
 function bindIPC() {
-    // Peer connections
+    // Peer connections.
+    // SINGLE SOURCE OF TRUTH: uploadTracking's Set<peerId> is the only peer
+    // counter. `drive.peers` is a derived mirror (kept for sort/filter reads).
+    // Previously a parallel `drive.peers++/--` counter had no peerId dedup and
+    // could drift from the Set — two sources of truth for the same number.
     window.electronAPI.onPeerConnected?.((event, data) => {
-        const driveId = data.driveId;
+        const { driveId, peerId } = data;
         const item = driveItems.get(driveId);
-        if (item) {
-            const drive = drives.find(d => d.id === driveId);
-            if (drive) {
-                drive.peers = (drive.peers || 0) + 1;
-                item.update({ peers: drive.peers });
-            }
+        if (!item) return;
+
+        if (!uploadTracking.has(driveId)) {
+            uploadTracking.set(driveId, {
+                peers: new Set(),
+                totalSpeed: 0,
+                lastUpdate: Date.now(),
+                hadTransfer: false
+            });
         }
+        const tracking = uploadTracking.get(driveId);
+        if (peerId) tracking.peers.add(peerId);
+        tracking.lastUpdate = Date.now();
+
+        const peerCount = tracking.peers.size;
+        const drive = drives.find(d => d.id === driveId);
+        if (drive) drive.peers = peerCount;
+        item.update({ peers: peerCount });
     });
-    
+
     window.electronAPI.onPeerDisconnected?.((event, data) => {
-        const driveId = data.driveId;
-        const peerId = data.peerId;
+        const { driveId, peerId } = data;
         const item = driveItems.get(driveId);
-        if (item) {
-            const drive = drives.find(d => d.id === driveId);
-            if (drive && drive.peers > 0) {
-                drive.peers--;
-                item.update({ peers: drive.peers });
-            }
-            
-            // Clean up upload aggregation tracking
-            if (uploadTracking.has(driveId) && peerId) {
-                const tracking = uploadTracking.get(driveId);
-                tracking.peers.delete(peerId);
-                
-                // Update UI if no more active uploaders
-                if (tracking.peers.size === 0) {
-                    item.update({ 
-                        status: 'complete',
-                        speed: 0,
-                        uploadText: null
-                    });
-                } else {
-                    // Update peer count
-                    item.update({ 
-                        peers: tracking.peers.size,
-                        uploadText: `${tracking.peers.size} peer${tracking.peers.size > 1 ? 's' : ''} downloading`
-                    });
-                }
-            }
+        if (!item) return;
+
+        const tracking = uploadTracking.get(driveId);
+        if (tracking && peerId) tracking.peers.delete(peerId);
+        const peerCount = tracking ? tracking.peers.size : 0;
+
+        const drive = drives.find(d => d.id === driveId);
+        if (drive) drive.peers = peerCount;
+
+        if (peerCount > 0) {
+            item.update({
+                peers: peerCount,
+                uploadText: `${peerCount} peer${peerCount > 1 ? 's' : ''} downloading`
+            });
+        } else if (tracking && tracking.hadTransfer) {
+            // Last active uploader left after a real transfer
+            item.update({ peers: 0, status: 'complete', speed: 0, uploadText: null });
+        } else {
+            // Peer left without transferring — back to idle, don't mark complete
+            item.update({ peers: 0, speed: 0, uploadText: null });
         }
     });
     
