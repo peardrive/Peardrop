@@ -1221,7 +1221,7 @@ function bindIPC() {
     // Drives updated (from HyperdriveManager)
     window.electronAPI.onDrivesUpdated?.((event, data) => {
         if (data.action === 'loaded') {
-            // Complete drives list loaded (e.g., after migration or startup)
+            // Complete drives list loaded (e.g., at startup)
             console.log('[PearDrop] Drives loaded, refreshing list:', data.drives?.length || 0);
             if (data.drives) {
                 for (const drive of data.drives) {

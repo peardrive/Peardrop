@@ -68,8 +68,6 @@ const os = require('os');
 
 // Hyperdrive manager for file sharing (🔒 SACRED core + UI interface)
 const { manager: hyperdriveManager, DriveState } = require('./lib/hyperdrive-manager');
-// QUARANTINED: ManifestRecovery tool removed from operation - will revisit later
-// const ManifestRecovery = require('./lib/manifest-recovery');
 // Download orchestration (✅ SAFE to modify)
 const { downloadFromDrive } = require('./lib/downloader');
 // Utilities
@@ -77,15 +75,6 @@ const { formatBytes, formatSpeed } = require('./lib/file-utils');
 // Debug logging
 const { createLogger, loadConfig: loadDebugConfig, setDebug, isDebugEnabled } = require('./lib/logger');
 const log = createLogger('PearDrop');
-
-// Migration tool (can be safely removed after migration completes)
-let migrationTool = null;
-try {
-    migrationTool = require('./lib/migration');
-} catch (error) {
-    // Migration tool not found - this is fine, continue normally
-    console.log('[PearDrop] Migration tool not available, continuing with normal startup');
-}
 
 // Platform detection
 const isMac = process.platform === 'darwin';
@@ -181,211 +170,6 @@ async function initializeApp() {
         throw error;
     }
 }
-
-// ============================================================================
-// Recovery Functions
-// ============================================================================
-
-/**
- * CORESTORE-CANONICAL RECOVERY: Check corestores and sync drive-state map
- */
-async function checkForOrphanedDrives() {
-    // QUARANTINED: ManifestRecovery completely disabled - will revisit later
-    // The recovery tool was causing more problems than it solved by incorrectly 
-    // identifying valid downloads as "empty" and recommending deletion.
-    // For now, we boot normally without any recovery checks.
-    
-    console.log('[PearDrop] ManifestRecovery DISABLED - booting normally');
-    
-    /* 
-    try {
-        const PEARDROP_DIR = path.join(os.homedir(), 'peardrop');
-        const DRIVES_DIR = path.join(PEARDROP_DIR, 'drives');
-        const DRIVES_STATE_FILE = path.join(PEARDROP_DIR, 'drives-state.json');
-        
-        const recovery = new ManifestRecovery(DRIVES_STATE_FILE, DRIVES_DIR);
-        const syncResult = await recovery.scanAndSync();
-        
-        if (syncResult.inSync) {
-            console.log('[PearDrop] Corestore and drive-state already in sync - booting normally');
-            return;
-        }
-        
-        console.log(`[PearDrop] Corestore sync results:`, {
-            corestoresWithData: syncResult.corestoresWithData,
-            corestoresEmpty: syncResult.corestoresEmpty,
-            entriesRecovered: syncResult.entriesRecovered,
-            entriesCreated: syncResult.entriesCreated,
-            cleanupRecommended: syncResult.cleanupRecommended
-        });
-        
-        // Handle recovery results
-        if (syncResult.entriesRecovered > 0 || syncResult.entriesCreated > 0) {
-            await showRecoveryCompletedDialog(syncResult);
-        }
-        
-        // Handle cleanup recommendation
-        if (syncResult.cleanupRecommended) {
-            await promptForCleanup(syncResult, recovery);
-        }
-        
-    } catch (error) {
-        console.error('[PearDrop] Error during corestore sync:', error);
-    }
-    */
-}
-
-/**
- * Show user what was recovered from corestores
- */
-async function showRecoveryCompletedDialog(syncResult) {
-    const { dialog } = require('electron');
-    
-    let message = 'Drive recovery completed!';
-    let details = [];
-    
-    if (syncResult.entriesCreated > 0) {
-        details.push(`• Created ${syncResult.entriesCreated} new drive entries from corestores`);
-    }
-    if (syncResult.entriesRecovered > 0) {
-        details.push(`• Recovered ${syncResult.entriesRecovered} corrupted drive entries`);
-    }
-    
-    details.push('\nYour drive list now reflects what\'s actually stored in the corestores.');
-    
-    await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Drive Recovery Complete',
-        message,
-        detail: details.join('\n')
-    });
-    
-    // Refresh frontend with recovered drives
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        const drives = hyperdriveManager.getAllDriveEntries();
-        mainWindow.webContents.send('drives-updated', {
-            action: 'recovered',
-            drives: drives
-        });
-    }
-}
-
-/**
- * STEPS 9-10: Prompt user to clean up empty/orphaned drives
- */
-async function promptForCleanup(syncResult, recovery) {
-    const { dialog } = require('electron');
-    
-    const emptyCount = syncResult.corestoresEmpty;
-    const orphanedCount = syncResult.orphanedEntries;
-    const totalToClean = emptyCount + orphanedCount;
-    
-    let message, detail;
-    
-    if (emptyCount > 0 && orphanedCount > 0) {
-        message = `Found ${emptyCount} empty corestores and ${orphanedCount} orphaned drive entries.`;
-        detail = 'Empty corestores have no files and serve no purpose.\nOrphaned entries point to non-existent corestores.\n\nRecommend cleaning up these useless entries.';
-    } else if (emptyCount > 0) {
-        message = `Found ${emptyCount} empty corestores with no files.`;
-        detail = 'These corestores contain no data and serve no purpose.\n\nRecommend removing them to clean up your drive list.';
-    } else {
-        message = `Found ${orphanedCount} orphaned drive entries.`;
-        detail = 'These drive entries point to non-existent corestores.\n\nRecommend removing them from your drive list.';
-    }
-    
-    const response = await dialog.showMessageBox(mainWindow, {
-        type: 'question',
-        buttons: ['Clean Up', 'Keep Them'],
-        defaultId: 0,
-        title: 'Empty/Orphaned Drives Found',
-        message,
-        detail: detail + '\n\nClean up now?'
-    });
-    
-    if (response.response === 0) { // Clean Up
-        await performCleanup(syncResult, recovery);
-    } else {
-        console.log('[PearDrop] User chose to keep empty/orphaned drives');
-    }
-}
-
-/**
- * STEP 10: Actually perform the cleanup
- */
-async function performCleanup(syncResult, recovery) {
-    console.log('[PearDrop] STEP 10: Performing cleanup...');
-    
-    let cleaned = 0;
-    let errors = 0;
-    
-    // Get current manifest
-    let currentManifest;
-    try {
-        const data = await fs.readFile(recovery.manifestPath, 'utf8');
-        currentManifest = JSON.parse(data);
-    } catch {
-        currentManifest = recovery.defaultManifest;
-    }
-    
-    // Clean up orphaned drive entries (no corestore)
-    for (const driveId of (syncResult.orphanedEntryIds || [])) {
-        try {
-            delete currentManifest.drives[driveId];
-            cleaned++;
-            console.log(`[PearDrop] 🗑️ Removed orphaned drive entry: ${driveId}`);
-        } catch (error) {
-            console.error(`[PearDrop] Failed to remove orphaned entry ${driveId}:`, error.message);
-            errors++;
-        }
-    }
-    
-    // Clean up empty corestores and their drive entries
-    for (const driveId of (syncResult.emptyCorestoreIds || [])) {
-        try {
-            // Remove drive entry if exists
-            if (currentManifest.drives[driveId]) {
-                delete currentManifest.drives[driveId];
-                console.log(`[PearDrop] 🗑️ Removed empty drive entry: ${driveId}`);
-            }
-            
-            // Remove empty corestore folder
-            await recovery.removeCorruptedDrive(driveId);
-            console.log(`[PearDrop] 🗑️ Removed empty corestore folder: ${driveId}`);
-            
-            cleaned++;
-        } catch (error) {
-            console.error(`[PearDrop] Failed to cleanup empty drive ${driveId}:`, error.message);
-            errors++;
-        }
-    }
-    
-    // Save updated manifest
-    await recovery.saveManifest(currentManifest);
-    
-    // Show completion
-    const { dialog } = require('electron');
-    await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Cleanup Complete',
-        message: `Cleanup finished: ${cleaned} items removed, ${errors} errors`,
-        detail: 'Your drive list now only contains drives with actual data.'
-    });
-    
-    // Refresh frontend - IMPORTANT: reload hyperdrive manager to reflect manifest changes
-    if (cleaned > 0 && mainWindow && !mainWindow.isDestroyed()) {
-        // Force hyperdrive manager to reload from the updated manifest
-        await hyperdriveManager._loadManifest();
-        
-        const drives = hyperdriveManager.getAllDriveEntries();
-        mainWindow.webContents.send('drives-updated', {
-            action: 'cleaned',
-            drives: drives
-        });
-        
-        console.log(`[PearDrop] Frontend updated with ${drives.length} remaining drives`);
-    }
-}
-
 
 // ============================================================================
 // IPC Handlers
@@ -959,92 +743,6 @@ function setupIPC() {
 }
 
 // ============================================================================
-// Migration Check (can be safely removed after migration completes)
-// ============================================================================
-
-/**
- * Check if drive data migration is needed and run with user consent
- */
-async function checkAndRunMigration() {
-    if (!migrationTool) {
-        // Migration tool not available - continue normally
-        return;
-    }
-
-    try {
-        const migrationCheck = await migrationTool.checkMigrationNeeded();
-        
-        if (!migrationCheck.needed) {
-            console.log('[PearDrop] No migration needed:', migrationCheck.reason);
-            return;
-        }
-
-        console.log('[PearDrop] Migration needed:', migrationCheck.summary);
-
-        // Show user consent dialog
-        const { dialog } = require('electron');
-        const response = await dialog.showMessageBox(mainWindow, {
-            type: 'question',
-            buttons: ['Migrate Drives', 'Skip (Boot Normally)'],
-            defaultId: 0,
-            cancelId: 1,
-            title: 'Drive Data Migration',
-            message: 'Saved drives need to be updated to the new format',
-            detail: `Found ${migrationCheck.summary.totalToMigrate} drives that need migration.\n\n` +
-                   `• ${migrationCheck.summary.driveManagerDrives} drives from old UI data\n` +
-                   `• ${migrationCheck.summary.hyperdriveManagerDrives} drives from P2P data\n` +
-                   `• ${migrationCheck.summary.orphanedDrives} orphaned drives will be cleaned\n\n` +
-                   `Your original files will be backed up safely.\n\n` +
-                   `Click "Migrate Drives" to update, or "Skip" to continue without migration.`,
-            checkboxLabel: 'Remember this choice (migration can be run later)',
-            checkboxChecked: false
-        });
-
-        if (response.response === 0) {
-            // User chose to migrate
-            console.log('[PearDrop] Starting migration with user consent...');
-            
-            const migrationResult = await migrationTool.runMigration();
-            
-            if (migrationResult.success) {
-                console.log('[PearDrop] Migration completed successfully:', {
-                    migrated: migrationResult.migrated,
-                    cleaned: migrationResult.cleaned,
-                    backedUp: migrationResult.backed_up
-                });
-                
-                // Show success notification
-                await dialog.showMessageBox(mainWindow, {
-                    type: 'info',
-                    buttons: ['Continue'],
-                    title: 'Migration Complete',
-                    message: `Successfully migrated ${migrationResult.migrated} drives`,
-                    detail: `Cleaned ${migrationResult.cleaned} orphaned drives.\n` +
-                           `Original files backed up:\n${migrationResult.backed_up.join('\n')}`
-                });
-            } else {
-                console.error('[PearDrop] Migration failed:', migrationResult.error);
-                
-                // Show error but continue
-                await dialog.showMessageBox(mainWindow, {
-                    type: 'warning',
-                    buttons: ['Continue Anyway'],
-                    title: 'Migration Failed',
-                    message: 'Drive migration failed, but app will continue normally',
-                    detail: `Error: ${migrationResult.error}\n\nYou can try migration again later.`
-                });
-            }
-        } else {
-            console.log('[PearDrop] User skipped migration, continuing normally');
-        }
-        
-    } catch (error) {
-        console.error('[PearDrop] Migration check failed:', error);
-        // Continue normally - don't let migration errors block startup
-    }
-}
-
-// ============================================================================
 // App Lifecycle
 // ============================================================================
 
@@ -1053,38 +751,6 @@ app.whenReady().then(async () => {
         await initializeApp();
         setupIPC();
         createWindow();
-        
-        // -------------------------------------------------------------------
-        // Migration prompt — PAUSED (2026-05-13)
-        // -------------------------------------------------------------------
-        // The legacy → unified state migration is intentionally disabled.
-        //
-        // Why it's paused:
-        //   • The previous purge-on-close bug (see fix in stopAll handlers)
-        //     left most users with empty/orphaned legacy state files, which
-        //     made checkMigrationNeeded() return `true` on every launch
-        //     and re-prompted the dialog every time.
-        //   • Until we revisit the migration UX (auto-skip when nothing
-        //     real to migrate, persist the "remember this choice" flag,
-        //     and consume the legacy files after a successful run), it
-        //     is friendlier to skip the prompt entirely and inform users
-        //     about the reset via a one-time in-app notice instead.
-        //
-        // What still lives in the codebase, untouched, for future use:
-        //   • lib/migration.js                — the migration logic itself
-        //   • checkAndRunMigration() below    — the user-consent flow
-        //   • The optional require near the top of main.js
-        //
-        // How to re-enable when the UX is ready:
-        //   • Uncomment the `await checkAndRunMigration();` line below.
-        //   • Make sure response.checkboxChecked is read & persisted, and
-        //     that legacy files are moved (not just copied) after success.
-        //
-        // await checkAndRunMigration();
-        
-        // CRITICAL: Check and fix drive manifest BEFORE initializing drives
-        // This ensures we don't start network activity with corrupted data
-        await checkForOrphanedDrives();
         
         // Set up event listeners BEFORE init() so we catch events during drive resume
         hyperdriveManager.on('peer-connected', (data) => {
@@ -1135,7 +801,7 @@ app.whenReady().then(async () => {
         // Initialize Hyperdrive manager with clean, accurate manifest (after event listeners are set up)
         await hyperdriveManager.init();
         
-        // Notify frontend that drives have been loaded (especially after migration)
+        // Notify frontend that drives have been loaded
         if (mainWindow && !mainWindow.isDestroyed()) {
             const drives = hyperdriveManager.getAllDriveEntries();
             mainWindow.webContents.send('drives-updated', {
