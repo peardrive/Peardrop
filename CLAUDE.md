@@ -59,9 +59,9 @@ See: `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #9
 
 ---
 
-## Current State (v0.18.0 - 2026-03-10)
+## Current State (v0.24.0 - 2026-07-02)
 
-**PearDrop is WORKING and AUDITED.** Core P2P file sharing is functional:
+**PearDrop is WORKING.** Core P2P file sharing is functional:
 - ✅ Share files → get `peardrop://` link
 - ✅ Download from link → files saved to `~/peardrop/downloads/`
 - ✅ Upload progress (sharer sees peers downloading)
@@ -69,15 +69,17 @@ See: `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #9
 - ✅ Manifest system (`.peardrop.json` in every share)
 - ✅ CLI tool (`peardrop share/download/list/stop/status`)
 - ✅ Glassmorphism UI (macOS-style)
-- ✅ **DriveManager** - Single source of truth for Shares tab (v0.17.0)
-- ✅ **Downloads in both tabs** - Home + Shares show same transfer (v0.17.1)
-- ✅ **Minimize/Cancel buttons** - Hide or delete downloads (v0.17.1)
-- ✅ **Full 20-point audit** - No lingering errors (v0.17.2)
+- ✅ QR retrieve (scan → auto-download) + peer count on idle shares
+- ✅ Path-traversal-safe downloads (`safeJoin`), atomic manifest writes
 
-### Recent Changes (v0.17.x)
-- Replaced `download-history.js` + manifest tracking with unified `DriveManager`
-- New IPC: `drives-list`, `drives-pause`, `drives-resume`, `drives-remove`
-- Deprecated files moved to `lib/_deprecated/`
+### Recent Changes (v0.24.0 cleanup/hardening pass, 2026-06-12 → 2026-07-02)
+- Security: path-traversal write fix, download stall watchdog, clean quit,
+  share-link key validation, tracker listener leak fix
+- **REMOVED: migration + manifest-recovery systems** (see Manifest Loading below)
+- Removed `lib/_graveyard/` (recoverable from git history), tracked backups/zips
+- Unified peer counting: `uploadTracking` Set<peerId> is the single source of
+  truth; `drive.peers` is a derived mirror
+- Consolidated UI helpers into `lib/ui-utils.js` (`window.PearUtils`)
 
 ---
 
@@ -220,27 +222,30 @@ peardrop stop    # stop all shares
 ├── CHANGELOG.md               # Version history
 └── lib/
     ├── hyperdrive-manager.js  # 🔒 SACRED: Drive lifecycle, swarm, P2P + state
-    ├── manifest-recovery.js   # ✅ SAFE: Robust drives-state.json load/recovery
     ├── downloader.js          # ✅ SAFE: Download orchestration (safeJoin-guarded)
     ├── progress-tracker.js    # Upload tracking, events
     ├── file-utils.js          # ✅ SAFE: Pure file utilities (incl. safeJoin)
     ├── drive-actions.js       # ✅ SAFE: menu action -> IPC adapter (renderer)
+    ├── ui-utils.js            # ✅ SAFE: shared browser helpers (window.PearUtils)
     ├── scroll-list/           # ✅ SAFE: list container (browser global)
     ├── drive-item/            # ✅ SAFE: transfer-row + info-panel (browser global)
     ├── qr-scanner/            # ✅ SAFE: QR generate/scan (browser global)
-    ├── migration.js           # legacy import (disabled), logger.js
-    └── _graveyard/            # ☠️ DEAD — quarantined, not loaded (safe to delete)
+    └── logger.js              # debug logging
 ```
+
+> ☠️ REMOVED (2026-07-02, recoverable from git history): `lib/migration.js`,
+> `lib/manifest-recovery.js`, `lib/_graveyard/`. Do NOT reintroduce recovery
+> logic that deletes manifest entries or drive folders — see Manifest Loading.
 
 ### Single Source of Truth (corrected 2026-06-10)
 
 > ⚠️ The old `drive-manager.js` / `~/peardrop/drives.json` "DriveManager" no
-> longer exists — `drive-manager.js` is in `_graveyard/` (`.removed`). Do not
-> reintroduce it. The live source of truth is below.
+> longer exists (deleted; recoverable from git history). Do not reintroduce it.
+> The live source of truth is below.
 
 **Owner:** `HyperdriveManager` (`lib/hyperdrive-manager.js`).
 **File:** `~/peardrop/drives-state.json` — written atomically (temp + rename) by
-`_saveManifest()`, loaded via `ManifestRecovery.loadWithRecovery()`.
+`_saveManifest()`, loaded by the simple non-destructive loader in `_loadManifest()`.
 **Wire manifest (separate, legitimate):** `/.peardrop.json` inside each drive —
 the P2P metadata a receiver reads (file names/sizes). Distinct from local state.
 
@@ -257,13 +262,13 @@ the P2P metadata a receiver reads (file names/sizes). Distinct from local state.
 **✅ SAFE (can modify freely):**
 - `downloader.js`: File writing, naming, progress callbacks
 - `file-utils.js`: getUniqueFilePath, ensureDir, formatBytes
+- `ui-utils.js`: shared browser helpers (formatBytes, getFileIcon, escapeHtml…)
 - `renderer.js`: UI only
 - `index.html`: Styles only
-- `manifest-recovery.js`: Robust manifest recovery and validation (v0.19.1)
 
 ### Storage Locations
 - `~/peardrop/drives/` - Hyperdrive corestore data (per-drive directories)
-- `~/peardrop/drives-state.json` - Persistent drive tracking with recovery support (v0.19.1)
+- `~/peardrop/drives-state.json` - Persistent drive tracking (atomic writes)
 - `~/peardrop/downloads/` - Downloaded files land here
 - `/.peardrop.json` (inside drives) - Share metadata for receivers
 
@@ -278,26 +283,24 @@ the P2P metadata a receiver reads (file names/sizes). Distinct from local state.
 3. **Manifest-first download** - Read manifest before downloading files
 4. **Blobs core hook** - Track download progress via `blobs.core.on('download')`
 5. **Background sharing** - Use `nohup` to keep shares alive
-6. **Bulletproof manifest recovery** (v0.19.1) - Isolated recovery system with fallback strategies
+6. **Simple, non-destructive manifest loading** (2026-07-02) - see below
 
-### Manifest Recovery System (v0.19.1)
+### Manifest Loading (2026-07-02 — REPLACED the recovery system)
 
-**File:** `lib/manifest-recovery.js` - Isolated module for robust drives-state.json handling
+The `ManifestRecovery` system and `lib/migration.js` were **deleted entirely**.
+Its `validateOnly()` pruned every manifest entry whose drive folder it couldn't
+see — so one transient failure to read `~/peardrop/drives/` wiped the whole
+share list. This caused the cascading loss of good, working shares.
 
-**Recovery Strategies (in order):**
-1. **Normal load** - Try standard JSON.parse first
-2. **Partial recovery** - Extract valid drive entries from corrupted JSON using regex
-3. **Complete rebuild** - Scan all Corestore folders and reconstruct metadata
-4. **Empty fallback** - Return clean manifest if all strategies fail
+The loader is now inline in `HyperdriveManager._loadManifest()`:
+1. Parse `drives-state.json`. Valid → use as-is. **Never prunes entries.**
+2. Missing file → start with empty manifest (first run).
+3. Corrupt file → back it up alongside (`.corrupted.<ts>`), start empty.
+4. **NEVER touches drive folders on disk.**
 
-**Key Methods:**
-- `loadWithRecovery()` - Main entry point, tries all strategies automatically
-- `validateAndSync()` - Ensures manifest ↔ drive folders consistency
-- `rebuildFromDrives()` - Scans `CORESTORE` folders to rebuild complete state
-- `scanDriveFolder(driveId)` - Extracts metadata from individual drive folder
-- `cleanupOrphans()` - Removes orphaned drives/manifest entries
-
-**Integration:** HyperdriveManager uses ManifestRecovery for all manifest operations instead of basic `fs.readFile()`
+**RULE:** Any future recovery/rebuild tool must be designed from scratch,
+read-only-by-default, and must never delete manifest entries or drive folders
+automatically. Deletion only with explicit per-item user confirmation.
 
 ---
 

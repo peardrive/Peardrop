@@ -1,6 +1,39 @@
 # PearDrop Changelog
 
+## v0.24.0 (2026-07-02) - Cleanup & Hardening Pass 🧹
+
+**Security fixes, removal of the migration/recovery systems, and major dead-code cleanup** (consolidates the `cleanup-hardening-pass` branch, 2026-06-12 → 2026-07-02)
+
+### Security & Reliability
+- **Path-traversal write fix**: all download writes routed through `safeJoin()` — a malicious sharer's `../../` keys can no longer escape the downloads folder
+- **Atomic manifest saves**: `drives-state.json` written via temp-file + rename; a crash mid-write can't truncate the drive list
+- **Download stall watchdog** (60s): a peer dropping mid-file fails that file instead of hanging forever
+- **Clean quit**: `before-quit` now awaits `stopAll` properly
+- **Share-link validation**: `peardrop://` links require a valid 64-hex key
+- **Tracker listener leak fixed** on drive stop/resume paths
+
+### REMOVED: Migration & Manifest-Recovery Systems
+- Deleted `lib/migration.js` (disabled since 2026-05-13) and `lib/manifest-recovery.js`, plus all main.js hooks (~900 lines)
+- **Why**: the recovery system's validation could delete every drive entry if the drives folder was momentarily unreadable — the root cause of cascading loss of good shares
+- Replaced with a simple, non-destructive loader in `HyperdriveManager._loadManifest()`: parse, or back up the corrupt file and start empty; never prunes entries, never touches drive folders
+
+### Fixes & Features
+- **Unified peer counting**: single source of truth (`Set<peerId>`); peer counts no longer drift on reconnects
+- **QR retrieve finished**: scanning a QR auto-starts the download; bad images show an error toast
+- **Peer visibility on idle shares**: rows show "Waiting for peers" / "N peers" outside active transfers
+
+### Cleanup
+- Removed `lib/_graveyard/` (~11k dead lines, recoverable from git history)
+- Untracked editor backups, zip archives, debug logs, `.DS_Store`; tightened `.gitignore`
+- Removed 4 dead IPC channels and dead `trackDownload()`
+- Consolidated duplicated UI helpers (`formatBytes`, `getFileIcon`, `escapeHtml`…) into `lib/ui-utils.js` (`window.PearUtils`)
+- Corrected stale CLAUDE.md architecture docs
+
+> Note: versions 0.20–0.23 shipped without changelog entries; their changes are folded into this entry.
+
 ## v0.19.1 (2026-05-15) - Bulletproof Manifest Recovery & Deduplication Fixes 🔧
+
+> ⚠️ The recovery system introduced here was removed in v0.24.0 after it proved destructive in practice.
 
 **Robust manifest recovery system and improved drive deduplication**
 

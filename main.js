@@ -1,7 +1,7 @@
 /**
  * MODULE: main.js (PearDrop v2)
  * PURPOSE: Electron main process for PearDrop - P2P file sharing
- * VERSION: 0.19.1
+ * VERSION: 0.24.0
  * 
  * EXPORTS: None (entry point)
  * 
