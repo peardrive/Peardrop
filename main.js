@@ -510,15 +510,15 @@ function setupIPC() {
         }
     });
 
-    // Resume seeding
+    // Resume seeding — actually re-opens the drive and rejoins the swarm
+    // (was a state-flip-only stub with a TODO until 2026-07-03)
     ipcMain.handle('drives-resume', async (event, { id }) => {
         try {
             console.log('[PearDrop] Resuming drive', { id });
-            
-            // TODO: Implement re-joining swarm for paused drives
-            // For now, just update state
-            const entry = await hyperdriveManager.resumeDriveEntry(id);
-            
+            const entry = await hyperdriveManager.resumeDrive(id);
+            if (!entry) {
+                return { success: false, error: 'Drive not found' };
+            }
             return { success: true, entry };
         } catch (error) {
             console.error('[PearDrop] Failed to resume drive:', error);

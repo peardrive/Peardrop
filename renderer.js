@@ -1045,6 +1045,17 @@ async function loadDrives() {
     }
 }
 
+// Backend DriveState -> DriveItem display status.
+// (Fixed 2026-07-03: backend sends `state`, but this read `drive.status`,
+// so paused/errored drives silently rendered as healthy "Sharing".)
+const STATE_TO_STATUS = {
+    active: 'sharing',
+    paused: 'paused',
+    errored: 'error',
+    seeking: 'connecting',
+    creating: 'connecting'
+};
+
 function normalizeDrive(drive) {
     return {
         id: drive.id || drive.driveId,
@@ -1052,7 +1063,7 @@ function normalizeDrive(drive) {
         size: drive.totalBytes || drive.size || 0,
         fileCount: drive.fileCount || drive.files?.length || 1,
         files: drive.files || [],
-        status: drive.status || 'sharing',
+        status: drive.status || STATE_TO_STATUS[drive.state] || 'sharing',
         progress: drive.progress,
         speed: drive.speed,
         peers: drive.peers || 0,
@@ -1926,8 +1937,10 @@ async function pauseAllTransfers() {
 }
 
 async function resumeAllTransfers() {
-    const pausedDrives = drives.filter(d => d.status === 'paused');
-    
+    // Include errored drives — resume retries them (errors are usually
+    // transient, e.g. a boot-time fd lock from a second instance)
+    const pausedDrives = drives.filter(d => d.status === 'paused' || d.status === 'error');
+
     if (pausedDrives.length === 0) {
         showToast('No paused transfers to resume', 'info');
         return;
