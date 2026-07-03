@@ -83,6 +83,22 @@ const isLinux = process.platform === 'linux';
 
 let mainWindow;
 
+// SINGLE INSTANCE LOCK (added 2026-07-03): two instances fight over the same
+// corestore fd locks ("File descriptor could not be locked"), which used to
+// make drives fail to resume. Second instance exits immediately and focuses
+// the first.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+    console.log('[PearDrop] Another instance is already running - exiting');
+    app.exit(0);
+}
+app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.focus();
+    }
+});
+
 // App configuration
 const APP_DATA_DIR = join(os.homedir(), 'peardrop');
 const DOWNLOADS_DIR = join(APP_DATA_DIR, 'downloads');
@@ -766,7 +782,7 @@ app.whenReady().then(async () => {
         });
         
         hyperdriveManager.on('upload-progress', (data) => {
-            console.log('[Main] Received upload-progress from hyperdriveManager:', data);
+            // (no console.log here — ProgressTracker already logs 10% steps)
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('upload-progress', {
                     ...data,
@@ -822,9 +838,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
-    // Just disconnect from network, preserve all drives and storage
+    // Disconnect from network only — persistState:false leaves each drive's
+    // manifest state untouched so shares auto-resume + re-announce on next boot
     try {
-        await hyperdriveManager.stopAll({ delete: false });
+        await hyperdriveManager.stopAll({ delete: false, persistState: false });
         console.log('[PearDrop] Disconnected from network');
     } catch (error) {
         console.error('[PearDrop] Cleanup error:', error);
@@ -854,7 +871,8 @@ app.on('before-quit', (event) => {
     cleanupInProgress = true;
     (async () => {
         try {
-            await hyperdriveManager.stopAll({ delete: false });
+            // persistState:false — shutdown must not demote drives to PAUSED
+            await hyperdriveManager.stopAll({ delete: false, persistState: false });
             console.log('[PearDrop] Drives closed cleanly on quit');
         } catch (error) {
             console.error('[PearDrop] Cleanup error:', error);
