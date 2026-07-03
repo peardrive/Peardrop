@@ -1947,6 +1947,7 @@ async function resumeAllTransfers() {
     }
     
     let resumed = 0;
+    let failed = 0;
     for (const drive of pausedDrives) {
         try {
             const result = await window.electronAPI.drivesResume?.(drive.id);
@@ -1954,13 +1955,22 @@ async function resumeAllTransfers() {
                 const status = drive.type === 'share' ? 'sharing' : 'downloading';
                 updateDriveInList({ id: drive.id, status });
                 resumed++;
+            } else {
+                failed++;
+                console.error('Failed to resume:', drive.id, result?.error);
             }
         } catch (err) {
+            failed++;
             console.error('Failed to resume:', drive.id, err);
         }
     }
-    
-    showToast(`Resumed ${resumed} transfer${resumed !== 1 ? 's' : ''}`, 'success');
+
+    // Report failures honestly — a silent "0 resumed" hides real errors
+    if (failed > 0) {
+        showToast(`Resumed ${resumed}, failed ${failed} — see console/logs`, 'error');
+    } else {
+        showToast(`Resumed ${resumed} transfer${resumed !== 1 ? 's' : ''}`, 'success');
+    }
 }
 
 async function clearCompletedTransfers() {

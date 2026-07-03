@@ -490,19 +490,26 @@ function setupIPC() {
     });
 
     // Pause seeding (keep drive, stop network)
-    ipcMain.handle('drives-pause', async (event, { id }) => {
+    ipcMain.handle('drives-pause', async (event, { id } = {}) => {
         try {
+            if (!id) {
+                console.warn('[PearDrop] drives-pause called without id');
+                return { success: false, error: 'Missing drive id' };
+            }
             console.log('[PearDrop] Pausing drive', { id });
-            
+
             // Stop the hyperdrive but keep storage
             const session = hyperdriveManager.activeDrives.get(id);
             if (session) {
                 await hyperdriveManager.stopDrive(id, { delete: false });
             }
-            
+
             // Update drive state
             const entry = await hyperdriveManager.pauseDriveEntry(id);
-            
+            if (!entry) {
+                // Previously returned success:true with a null entry — a silent no-op
+                return { success: false, error: 'Drive not found' };
+            }
             return { success: true, entry };
         } catch (error) {
             console.error('[PearDrop] Failed to pause drive:', error);
@@ -512,8 +519,12 @@ function setupIPC() {
 
     // Resume seeding — actually re-opens the drive and rejoins the swarm
     // (was a state-flip-only stub with a TODO until 2026-07-03)
-    ipcMain.handle('drives-resume', async (event, { id }) => {
+    ipcMain.handle('drives-resume', async (event, { id } = {}) => {
         try {
+            if (!id) {
+                console.warn('[PearDrop] drives-resume called without id');
+                return { success: false, error: 'Missing drive id' };
+            }
             console.log('[PearDrop] Resuming drive', { id });
             const entry = await hyperdriveManager.resumeDrive(id);
             if (!entry) {

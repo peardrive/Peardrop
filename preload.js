@@ -13,9 +13,9 @@
  *
  *     Drive list (HyperdriveManager + drives-state.json):
  *       - drivesList() - Get all drives
- *       - drivesPause(data) - Pause seeding (keep data)
- *       - drivesResume(data) - Resume seeding
- *       - drivesRemove(data) - Remove drive completely
+ *       - drivesPause(id | {id}) - Pause seeding (keep data)
+ *       - drivesResume(id | {id}) - Resume seeding (rejoins swarm)
+ *       - drivesRemove(id | {id, deleteFiles}) - Remove drive completely
  *
  *     Utilities:
  *       - openDownloads() - Open downloads folder
@@ -59,9 +59,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // HyperdriveManager - Single source of truth for Shares tab
     // ========================================================================
     drivesList: () => ipcRenderer.invoke('drives-list'),
-    drivesPause: (data) => ipcRenderer.invoke('drives-pause', data),
-    drivesResume: (data) => ipcRenderer.invoke('drives-resume', data),
-    drivesRemove: (data) => ipcRenderer.invoke('drives-remove', data),
+    // NORMALIZED (2026-07-03): callers historically passed either a bare id
+    // string or an {id} object while main always destructures {id} — the
+    // mismatch made Pause/Resume silent no-ops ({id: undefined}). The bridge
+    // now accepts both shapes so the contract can't silently drift again.
+    drivesPause: (idOrData) => ipcRenderer.invoke('drives-pause',
+        typeof idOrData === 'string' ? { id: idOrData } : idOrData),
+    drivesResume: (idOrData) => ipcRenderer.invoke('drives-resume',
+        typeof idOrData === 'string' ? { id: idOrData } : idOrData),
+    drivesRemove: (idOrData) => ipcRenderer.invoke('drives-remove',
+        typeof idOrData === 'string' ? { id: idOrData } : idOrData),
 
     // ========================================================================
     // Utilities
