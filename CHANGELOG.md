@@ -1,5 +1,21 @@
 # PearDrop Changelog
 
+## v0.24.1 (2026-07-03) - Shares That Actually Survive 🔁
+
+**Fixed the full chain of bugs that silently stopped shares from announcing after restarts.** Verified with a real Mac→Linux transfer.
+
+### Fixed
+- **Quit no longer pauses your shares**: shutdown disconnects from the network without touching persisted drive state, so every share resumes and re-announces on the next boot (previously each graceful quit permanently demoted all shares to paused)
+- **Resume actually works**: rejoins the swarm and re-announces (the handler was a state-flip stub with a `TODO: rejoin swarm`)
+- **Pause/Resume IPC was a silent no-op**: argument-shape mismatch sent `{id: undefined}`; the bridge now normalizes shapes and handlers return real errors instead of fake success
+- **UI shows drive state**: paused (yellow, dimmed) and errored (red ⚠) rows are visible; Resume appears in the menu for both; "Resume all" reports failures honestly
+- **Transient boot failures are no longer permanent**: a failed resume (e.g. locked corestore) retries next boot instead of persisting `errored`
+- **Single-instance lock**: a second launch focuses the running app instead of fighting over corestore file locks
+
+### Changed
+- Log noise cut ~30×: upload progress logs once per 10% step; boot prints a one-line state summary; DHT announce lines include the `peardrop://` link-key prefix for at-a-glance link debugging
+- Docs consolidated: ROADMAP/PROPOSALs/ARCHITECTURE/CLEANUP-HANDOFF folded into README.md + CLAUDE.md
+
 ## v0.24.0 (2026-07-02) - Cleanup & Hardening Pass 🧹
 
 **Security fixes, removal of the migration/recovery systems, and major dead-code cleanup** (consolidates the `cleanup-hardening-pass` branch, 2026-06-12 → 2026-07-02)

@@ -59,20 +59,31 @@ See: `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #9
 
 ---
 
-## Current State (v0.24.0 - 2026-07-02)
+## Current State (v0.24.1 - 2026-07-03)
 
-**PearDrop is WORKING.** Core P2P file sharing is functional:
+**PearDrop is WORKING — verified with a real Mac→Linux transfer.** Core P2P:
 - ✅ Share files → get `peardrop://` link
 - ✅ Download from link → files saved to `~/peardrop/downloads/`
-- ✅ Upload progress (sharer sees peers downloading)
-- ✅ Download progress (receiver sees real % with file name)
+- ✅ Shares survive restarts: resume + re-announce on boot (fixed 2026-07-03)
+- ✅ Pause/Resume actually stop/rejoin the swarm (fixed 2026-07-03)
+- ✅ Upload/download progress; peer count on idle shares
 - ✅ Manifest system (`.peardrop.json` in every share)
 - ✅ CLI tool (`peardrop share/download/list/stop/status`)
-- ✅ Glassmorphism UI (macOS-style)
-- ✅ QR retrieve (scan → auto-download) + peer count on idle shares
-- ✅ Path-traversal-safe downloads (`safeJoin`), atomic manifest writes
+- ✅ QR retrieve (scan → auto-download); glassmorphism UI
+- ✅ Path-traversal-safe downloads (`safeJoin`), atomic manifest writes,
+  single-instance lock
 
-### Recent Changes (v0.24.0 cleanup/hardening pass, 2026-06-12 → 2026-07-02)
+### Recent Changes
+**v0.24.1 (2026-07-03) — the "shares don't announce" hunt:**
+- Quit no longer persists PAUSED (shutdown leaves drive state untouched)
+- Resume failures no longer persist ERRORED (in-memory `resumeErrors`, retry next boot)
+- `resumeDrive()` actually rejoins the swarm (was a state-flip stub with a TODO)
+- Fixed IPC arg-shape mismatch that made Pause/Resume silent no-ops (see Lessons)
+- Frontend now maps backend `state` → display status (paused/error rows visible)
+- Log throttling: progress at 10% steps; boot prints a state-breakdown summary;
+  announce lines include the link-key prefix
+
+**v0.24.0 (2026-06-12 → 07-02) — cleanup/hardening pass:**
 - Security: path-traversal write fix, download stall watchdog, clean quit,
   share-link key validation, tracker listener leak fix
 - **REMOVED: migration + manifest-recovery systems** (see Manifest Loading below)
@@ -153,6 +164,43 @@ Copy-paste modification instead of single source of truth. Changed one, forgot t
 ### Rule Added
 > **If the same element appears in multiple places, it MUST be a single module.**
 > See `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #8
+
+---
+
+## 📚 Lessons Learned (v0.24.x - The "Shares Don't Announce" Hunt)
+
+Five bugs, one theme: **every failure lived at a seam between layers, and every
+layer swallowed errors and reported success.** The hyperdrive stack itself never
+failed once.
+
+### What Happened (2026-07-03)
+1. **Quit demoted every share.** `stopAll()` on quit persisted `state=PAUSED`
+   for all drives; boot only resumes `active`/`seeking`. Every graceful quit
+   permanently silenced every share. (Ctrl-C'd sessions survived — backwards.)
+2. **Resume was a stub.** The `drives-resume` handler had a literal
+   `TODO: rejoin swarm` and just flipped the manifest field.
+3. **The UI was blind.** Backend sends `state`; renderer read `status`;
+   paused/errored drives rendered as healthy "Sharing".
+4. **IPC argument shapes didn't match.** main destructures `{id}`; all four
+   pause/resume callers passed bare id strings → `{id: undefined}` → no-op.
+   `drives-pause` returned `success:true` even with a null result.
+5. **Transient boot failures were persisted as permanent.** A corestore fd-lock
+   (second running instance) marked drives ERRORED forever.
+
+### Rules Added
+> **IPC CONTRACT:** Drive operations take `{id, ...}` objects. `preload.js`
+> normalizes bare-string ids at the bridge. Handlers MUST return
+> `success:false` for no-ops — never report success for work not done.
+
+> **WIRING AUDIT:** After changing any IPC surface, run the audit: extract
+> every `ipcRenderer.invoke` channel from preload, every `ipcMain.handle` from
+> main, every `webContents.send` and `ipcRenderer.on`, and diff the sets.
+> Zero orphans in both directions, and spot-check argument shapes end-to-end
+> (caller → preload → handler destructure).
+
+> **STATE PERSISTENCE:** App lifecycle events (quit, boot, crash) must NEVER
+> change a drive's persisted state. Only explicit user actions (pause, resume,
+> remove) write state. Transient failures stay in-memory.
 
 ---
 
@@ -384,19 +432,57 @@ Result: Backdrop (9999 at root) beats menu (10000 inside a z-50 context). Menu i
 - **Container:** `position: relative` only — NO z-index
 - **Active item elevation:** `.menu-open` class adds `z-index: 1000` to DriveItem when menu is open, lifting it above sibling DriveItems so their buttons don't cover the menu
 
-See `ARCHITECTURE.md` for full component layer documentation.
+---
+
+## 🧱 Component Architecture (absorbed from ARCHITECTURE.md, 2026-07-03)
+
+**Philosophy: blocks inside blocks.** Every component owns its block of space.
+Parents provide empty slots; children control everything inside their slot; no
+component reaches outside its block or manipulates another's internals.
+
+```
+App Window
+└── ScrollList         — creates/manages empty slots, scrolling, reordering.
+    │                    Does NOT know slot contents. NO z-index (traps menus).
+    └── DriveItem      — renders one transfer row, owns its context menu,
+        │                emits 'action' events. Adds .menu-open (z:1000) to
+        │                elevate itself above sibling rows while menu is open.
+        └── DriveActions — maps action names → electronAPI calls. No DOM
+                           knowledge; receives the API as a parameter.
+```
+
+**Event flow (one direction, one path):**
+DriveItem emits `action` → renderer → `DriveActions.handleAction(api, action,
+data)` → preload → main IPC → HyperdriveManager → result back up → renderer
+updates the item. Never bypass this chain with a side channel.
+
+**Menu test checklist (after ANY UI change):**
+- [ ] 3-dot menu opens; items clickable; pointer cursor on hover
+- [ ] Menu closes on outside click / Escape
+- [ ] Menu renders ABOVE sibling rows (the .menu-open elevation)
+- [ ] Confirm dialogs appear above everything
 
 ---
 
 ## What's Next (Future Work)
 
-From Guy's roadmap:
+From Guy's roadmap (absorbed from ROADMAP.md, 2026-07-03):
 1. **iOS/Android clients** - Before download history UI
 2. **Receive links** - QR code for others to send TO you
-3. **Spaces integration** - Group sharing via pearcore
+3. **Device cloud** (pearcore) - Link your own devices via key attestation so
+   they assist each other's transfers. Key decision (2026-03-28): account
+   space is created LAZILY — only when the user first clicks "Add Device",
+   never at first launch (avoids orphan spaces + DHT pollution).
 4. **Download history** - Track past transfers
 
-See `PROPOSAL-metadata-layer.md` for pearcore signaling layer design.
+**Known open bug (needs sacred approval): share double-write** — `createDrive`
+writes a manifest entry, then main.js `hyperdrive-share` calls `addDriveEntry`
+which overwrites it with a different shape, discarding `discoveryKey`/
+`expiresAt`/per-file `addedAt`. Two writers, one truth. Fix before/at publish.
+
+**Scope guard (settled in the v1 proposal — do NOT re-add):** no friend lists,
+no identity systems, no whitelist trust, no push notifications, no Nostr. Those
+belong to PearDrive proper. PearDrop = link sharing + (later) own-device cloud.
 
 ---
 

@@ -27,7 +27,7 @@ No accounts. No limits. No bullshit. Just drop a file, get a link, send it to wh
 Every other file sharing service:
 - Requires you to create an account
 - Stores your files on their servers
-- Has arbitrary size limits  
+- Has arbitrary size limits
 - Dies when the company goes under
 - Tracks everything you do
 
@@ -44,25 +44,26 @@ PearDrop:
 
 ### Sharing Files
 1. **Drag & drop** files into the app
-2. Click **"SHARE"** 
+2. Click **"SHARE"**
 3. **Copy the link** (`peardrop://abc123...`)
 4. **Send it** to whoever needs the files
 
-### Getting Files  
-1. **Paste the link** into the app
+### Getting Files
+1. **Paste the link** into the app (or scan its QR code)
 2. Click **"DOWNLOAD"**
-3. **Files appear** in your downloads folder
+3. **Files appear** in `~/peardrop/downloads/`
 
 That's literally it. No registrations, no uploads to "the cloud," no waiting for some server to process your stuff.
+
+**One thing to know:** this is true peer-to-peer — there is no server holding your files. The sharing device must be online (with the app running) for someone to download from it. Shares persist across app restarts and re-announce automatically.
 
 ---
 
 ## 🛠 Getting Started
 
-### Download & Run
-1. **Download** the latest release for your platform
-2. **Install** and run PearDrop
-3. **Start sharing** files immediately
+### Requirements
+- Node.js 18+ and npm
+- macOS, Windows, or Linux
 
 ### Build From Source
 ```bash
@@ -72,13 +73,23 @@ npm install
 npm start
 ```
 
+### CLI
+A command-line tool ships in `bin/peardrop`:
+```bash
+peardrop share <file>          # share a file, prints the peardrop:// link
+peardrop download <link> [dir] # download from a link
+peardrop list                  # active shares
+peardrop status                # statistics
+peardrop stop                  # stop all shares
+```
+
 ---
 
 ## 🔧 Technical Details
 
 **Built on battle-tested tech:**
-- **Hyperdrive** - Distributed file system from the Hypercore Protocol
-- **Hyperswarm** - P2P networking that punches through NAT/firewalls
+- **[Hyperdrive](https://docs.pears.com/building-blocks/hyperdrive)** - Distributed file system from the Hypercore Protocol
+- **[Hyperswarm](https://docs.pears.com/building-blocks/hyperswarm)** - P2P networking that punches through NAT/firewalls
 - **Electron** - Cross-platform desktop app framework
 
 **No size limits:**
@@ -86,10 +97,48 @@ npm start
 - Works with files of any size
 - Memory efficient
 
-**Bulletproof recovery:**
-- Corrupted state files auto-rebuild from drive data
-- Handles network interruptions gracefully
-- Persistent peer discovery (files resume downloading even after restarts)
+**Safe by design:**
+- Downloads are path-traversal guarded — a malicious share can't write outside your downloads folder
+- Drive state is written atomically — a crash mid-write can't corrupt your share list
+- State loading is strictly non-destructive — a corrupted state file is backed up and never causes data loss
+- A stalled peer fails the transfer cleanly instead of hanging forever
+- Single-instance lock — a second launch focuses the running app instead of fighting over storage
+
+---
+
+## 📁 File Storage
+
+```
+~/peardrop/
+├── drives/              # P2P drive data (one folder per share)
+├── drives-state.json    # Share list (atomic writes, non-destructive loads)
+└── downloads/           # Your downloaded files end up here
+```
+
+Shared drive data stays in `~/peardrop/drives/` until you remove the share from the app — that's what lets shares survive restarts.
+
+---
+
+## 🎨 Features
+
+### ✅ Currently Working
+- **Unlimited file sizes** - Share anything
+- **Real P2P transfers** - Direct peer-to-peer connections with live progress and speed
+- **Persistent shares** - Shares survive app restarts and re-announce automatically
+- **Pause / Resume** - Stop announcing a share without deleting it; resume rejoins the swarm
+- **Auto-discovery** - No manual IP addresses or port forwarding
+- **QR codes** - Show a QR for any share; scan one to auto-start a download
+- **Peer visibility** - See how many peers are connected to each share
+- **CLI tool** - Command line interface for automation
+- **Cross-platform** - Windows, Mac, Linux
+- **Clean UI** - Dark theme with glassmorphism design
+
+### 🔮 Roadmap
+- **Mobile apps** - iOS and Android clients
+- **Receive links** - A QR others can use to send files TO you
+- **Device cloud** - Link your own devices so they assist each other's transfers (built on pearcore)
+- **Link expiration** - Set time limits on shares
+- **Download history** - Track past transfers
 
 ---
 
@@ -105,48 +154,15 @@ This is how the internet was supposed to work.
 
 ---
 
-## 🎨 Features
-
-### ✅ Currently Working
-- **Unlimited file sizes** - Share anything
-- **Real P2P transfers** - Direct peer-to-peer connections
-- **Auto-discovery** - No manual IP addresses or port forwarding
-- **Cross-platform** - Windows, Mac, Linux
-- **Clean UI** - Dark theme with glassmorphism design
-- **Progress tracking** - See real transfer speeds and progress
-- **CLI tool** - Command line interface for automation
-- **QR codes** - Scan links with your phone camera
-
-### 🔮 Coming Soon
-- **Mobile apps** - iOS and Android clients
-- **Folder sharing** - Share entire directories with structure
-- **Resume transfers** - Pick up where you left off
-- **Link expiration** - Set time limits on shares
-
----
-
-## 📁 File Storage
-
-```
-~/peardrop/
-├── drives/              # P2P drive data (auto-managed)
-├── drives-state.json    # Drive manifest (auto-recovers if corrupted)  
-└── downloads/           # Your downloaded files end up here
-```
-
-**Privacy note:** Files are only stored temporarily during transfer. When you stop sharing, the data gets cleaned up automatically.
-
----
-
 ## 🤝 Contributing
 
-**Found a bug?** Open an issue.  
-**Want to add a feature?** Fork it and send a PR.  
+**Found a bug?** Open an issue.
+**Want to add a feature?** Fork it and send a PR.
 **Have questions?** Start a discussion.
 
 **Code style:** We keep it simple. Follow existing patterns, add comments for complex stuff, test your changes.
 
-**Architecture:** New features should be isolated modules (see `CLAUDE.md` for details).
+**Architecture:** Read `CLAUDE.md` before touching code — it documents the sacred core (the basic share→download flow that must never break), the component architecture, and hard-won lessons. New features should be isolated modules.
 
 ---
 
@@ -160,12 +176,10 @@ You can use, modify, and distribute this code. If you improve it, those improvem
 
 ## 🙏 Built With
 
-- **[Hypercore Protocol](https://hypercore-protocol.org/)** - The P2P foundation
+- **[Hypercore Protocol / Pears](https://docs.pears.com/)** - The P2P foundation
 - **[Electron](https://electronjs.org/)** - Cross-platform desktop apps
 - **Your feedback** - Keep the issues and suggestions coming
 
 ---
 
 *Stop feeding Big Tech your data. Take back control of your files.*
-
-**[Download PearDrop](https://github.com/peardrive/PearDrop-Desktop/releases) | [Join the Discussion](https://github.com/peardrive/PearDrop-Desktop/discussions)**
