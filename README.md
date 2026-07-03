@@ -137,7 +137,6 @@ Shared drive data stays in `~/peardrop/drives/` until you remove the share from 
 - **Mobile apps** - iOS and Android clients
 - **Receive links** - A QR others can use to send files TO you
 - **Device cloud** - Link your own devices so they assist each other's transfers (built on pearcore)
-- **Link expiration** - Set time limits on shares
 - **Download history** - Track past transfers
 
 ---

@@ -11,6 +11,10 @@
 - **UI shows drive state**: paused (yellow, dimmed) and errored (red ⚠) rows are visible; Resume appears in the menu for both; "Resume all" reports failures honestly
 - **Transient boot failures are no longer permanent**: a failed resume (e.g. locked corestore) retries next boot instead of persisting `errored`
 - **Single-instance lock**: a second launch focuses the running app instead of fighting over corestore file locks
+- **Share double-write eliminated**: `createDrive` is now the single writer of share entries (the share handler used to overwrite it with a different schema, discarding `discoveryKey` and per-file drive paths); download completion updates the existing entry instead of re-adding it; `addDriveEntry` warns and merges instead of silently replacing
+
+### Removed
+- **TTL/expiration system**: never reachable from any UI or CLI, and its only possible behavior was auto-deleting a share on a timer. Shares now end only by explicit user pause or remove.
 
 ### Changed
 - Log noise cut ~30×: upload progress logs once per 10% step; boot prints a one-line state summary; DHT announce lines include the `peardrop://` link-key prefix for at-a-glance link debugging

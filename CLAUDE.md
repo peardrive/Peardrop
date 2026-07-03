@@ -475,10 +475,14 @@ From Guy's roadmap (absorbed from ROADMAP.md, 2026-07-03):
    never at first launch (avoids orphan spaces + DHT pollution).
 4. **Download history** - Track past transfers
 
-**Known open bug (needs sacred approval): share double-write** — `createDrive`
-writes a manifest entry, then main.js `hyperdrive-share` calls `addDriveEntry`
-which overwrites it with a different shape, discarding `discoveryKey`/
-`expiresAt`/per-file `addedAt`. Two writers, one truth. Fix before/at publish.
+**FIXED (2026-07-03): share double-write.** `createDrive` is now the ONLY
+writer of share entries (superset schema: P2P truth + UI fields). The
+`hyperdrive-share` handler is pure glue. The download path uses
+`updateDriveEntry` on the existing recv_ entry instead of re-adding.
+`addDriveEntry` has a tripwire: it warns + merges (never silently replaces)
+if asked to write an existing id. The never-used TTL/expiration system was
+deleted with it — **shares end ONLY by explicit user pause/remove, never
+automatically.** Do not reintroduce auto-expiry.
 
 **Scope guard (settled in the v1 proposal — do NOT re-add):** no friend lists,
 no identity systems, no whitelist trust, no push notifications, no Nostr. Those

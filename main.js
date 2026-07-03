@@ -196,51 +196,33 @@ function setupIPC() {
     // Hyperdrive File Sharing
     // ========================================================================
 
-    // Create a shareable link for files
+    // Create a shareable link for files.
+    // GLUE ONLY: createDrive() is the single writer of the manifest entry —
+    // it creates the drive, records it, and returns the link + entry. This
+    // handler used to build and write a SECOND entry via addDriveEntry with a
+    // different schema, overwriting the first (discarding discoveryKey and
+    // per-file in-drive paths). Fixed 2026-07-03. Do not add logic here.
     ipcMain.handle('hyperdrive-share', async (event, { files, options = {} }) => {
         try {
             const result = await hyperdriveManager.createDrive(files, {
-                ttlMs: options.ttlMs || 0,
                 name: options.name
             });
-            
+
             console.log('[PearDrop] Share created:', result.shareLink);
-            
-            // Calculate total bytes from files
-            const totalBytes = files.reduce((sum, f) => sum + (f.size || 0), 0);
-            const shareName = options.name || (files.length === 1 ? files[0].name : `${files.length} files`);
-            
-            // Add to drives state (single source of truth for UI)
-            const driveEntry = await hyperdriveManager.addDriveEntry({
-                id: result.driveId,
-                key: result.key,
-                shareLink: result.shareLink,
-                name: shareName,
-                files: files.map(f => ({
-                    name: f.name,
-                    path: f.path,
-                    size: f.size
-                })),
-                totalBytes: totalBytes,
-                localPath: files[0]?.path ? path.dirname(files[0].path) : null,
-                storagePath: path.join(hyperdriveManager.drivesDir, result.driveId),
-                state: DriveState.ACTIVE,
-                isUpload: true
-            });
-            
-            // Notify renderer about new drive entry
+
+            // Notify renderer about the new drive entry
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('drives-updated', {
                     action: 'added',
-                    entry: driveEntry
+                    entry: result.entry
                 });
             }
-            
+
             return {
                 success: true,
                 driveId: result.driveId,
                 shareLink: result.shareLink,
-                driveEntryId: driveEntry.id
+                driveEntryId: result.driveId
             };
         } catch (error) {
             console.error('[PearDrop] Share failed:', error);
@@ -377,34 +359,33 @@ function setupIPC() {
                 }
             });
             
-            // Add to drives state (single source of truth)
-            const driveEntry = await hyperdriveManager.addDriveEntry({
-                id: driveId,
-                key: session.metadata?.key,
-                shareLink: session.shareLink || `peardrop://${session.metadata?.key || 'unknown'}`,
-                name: session.shareName,
+            // UPDATE the existing recv_ entry (openDrive already created it in
+            // 'seeking' state) — do NOT re-add. Re-adding was a second
+            // double-write that replaced the entry wholesale. Fixed 2026-07-03.
+            const driveEntry = await hyperdriveManager.updateDriveEntry(driveId, {
                 files: result.files,
                 totalBytes: result.totalBytes,
                 localPath: downloadPath,
-                storagePath: path.join(hyperdriveManager.drivesDir, driveId),
-                state: DriveState.ACTIVE,
-                isUpload: false  // This is a download
+                state: DriveState.ACTIVE,  // download done → now seeding
+                isUpload: false
             });
             
             // Mark session as seeding mode
             if (session) {
                 session.isSeeding = true;
-                session.driveEntryId = driveEntry.id;
+                session.driveEntryId = driveId;
             }
-            
-            console.log('[PearDrop] Download complete, now seeding:', driveEntry.name);
-            
-            // Notify renderer
+
+            console.log('[PearDrop] Download complete, now seeding:', driveEntry?.name || driveId);
+
+            // Notify renderer (NOTE: was driveEntry.id — a field that doesn't
+            // exist on manifest entries (they use driveId) — so this event
+            // carried driveId: undefined. Fixed 2026-07-03.)
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('files-downloaded', {
                     files: result.files,
                     downloadPath,
-                    driveId: driveEntry.id,
+                    driveId,
                     isSeeding: true
                 });
                 
@@ -415,7 +396,7 @@ function setupIPC() {
                 });
             }
             
-            return { success: true, files: result.files, downloadPath, driveId: driveEntry.id };
+            return { success: true, files: result.files, downloadPath, driveId };
         } catch (error) {
             console.error('[PearDrop] Download failed:', error);
             return { success: false, error: error.message };
