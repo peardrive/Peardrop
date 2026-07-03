@@ -466,6 +466,20 @@ updates the item. Never bypass this chain with a side channel.
 
 ## What's Next (Future Work)
 
+**PRIORITY UX DEBT (Guy, 2026-07-03 — do this before/with the next feature pass):**
+Share creation of a large file looks frozen and cannot be cancelled.
+1. **Creation progress**: `createDrive` streams files into the drive with zero
+   feedback — for multi-GB files the UI shows nothing for minutes. Emit
+   per-file/byte progress events during ingest (count bytes through the
+   `createWriteStream` pipe), surface as a `creating` row with a progress bar
+   (DriveItem already renders progress; may need a `creating` status entry).
+2. **In-app cancel**: no way to abort a share mid-creation. Add a cancel action
+   that stops the stream and reuses the existing CREATING-state cleanup
+   (delete partial storage + manifest entry — same logic as
+   `_cleanupOrphanedDrives`, which already self-heals aborted creations at boot).
+3. **Principle**: no long operation may run without visible progress AND a way
+   to cancel it in-app. A user should never need to kill the process.
+
 From Guy's roadmap (absorbed from ROADMAP.md, 2026-07-03):
 1. **iOS/Android clients** - Before download history UI
 2. **Receive links** - QR code for others to send TO you
