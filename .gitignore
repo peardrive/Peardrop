@@ -2,3 +2,7 @@ node_modules/
 .DS_Store
 *.log
 debug-log-*.txt
+*.backup
+*.zip
+*.tmp
+.claude/

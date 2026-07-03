@@ -59,25 +59,38 @@ See: `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #9
 
 ---
 
-## Current State (v0.18.0 - 2026-03-10)
+## Current State (v0.24.1 - 2026-07-03)
 
-**PearDrop is WORKING and AUDITED.** Core P2P file sharing is functional:
+**PearDrop is WORKING — verified with a real Mac→Linux transfer.** Core P2P:
 - ✅ Share files → get `peardrop://` link
 - ✅ Download from link → files saved to `~/peardrop/downloads/`
-- ✅ Upload progress (sharer sees peers downloading)
-- ✅ Download progress (receiver sees real % with file name)
+- ✅ Shares survive restarts: resume + re-announce on boot (fixed 2026-07-03)
+- ✅ Pause/Resume actually stop/rejoin the swarm (fixed 2026-07-03)
+- ✅ Upload/download progress; peer count on idle shares
 - ✅ Manifest system (`.peardrop.json` in every share)
 - ✅ CLI tool (`peardrop share/download/list/stop/status`)
-- ✅ Glassmorphism UI (macOS-style)
-- ✅ **DriveManager** - Single source of truth for Shares tab (v0.17.0)
-- ✅ **Downloads in both tabs** - Home + Shares show same transfer (v0.17.1)
-- ✅ **Minimize/Cancel buttons** - Hide or delete downloads (v0.17.1)
-- ✅ **Full 20-point audit** - No lingering errors (v0.17.2)
+- ✅ QR retrieve (scan → auto-download); glassmorphism UI
+- ✅ Path-traversal-safe downloads (`safeJoin`), atomic manifest writes,
+  single-instance lock
 
-### Recent Changes (v0.17.x)
-- Replaced `download-history.js` + manifest tracking with unified `DriveManager`
-- New IPC: `drives-list`, `drives-pause`, `drives-resume`, `drives-remove`
-- Deprecated files moved to `lib/_deprecated/`
+### Recent Changes
+**v0.24.1 (2026-07-03) — the "shares don't announce" hunt:**
+- Quit no longer persists PAUSED (shutdown leaves drive state untouched)
+- Resume failures no longer persist ERRORED (in-memory `resumeErrors`, retry next boot)
+- `resumeDrive()` actually rejoins the swarm (was a state-flip stub with a TODO)
+- Fixed IPC arg-shape mismatch that made Pause/Resume silent no-ops (see Lessons)
+- Frontend now maps backend `state` → display status (paused/error rows visible)
+- Log throttling: progress at 10% steps; boot prints a state-breakdown summary;
+  announce lines include the link-key prefix
+
+**v0.24.0 (2026-06-12 → 07-02) — cleanup/hardening pass:**
+- Security: path-traversal write fix, download stall watchdog, clean quit,
+  share-link key validation, tracker listener leak fix
+- **REMOVED: migration + manifest-recovery systems** (see Manifest Loading below)
+- Removed `lib/_graveyard/` (recoverable from git history), tracked backups/zips
+- Unified peer counting: `uploadTracking` Set<peerId> is the single source of
+  truth; `drive.peers` is a derived mirror
+- Consolidated UI helpers into `lib/ui-utils.js` (`window.PearUtils`)
 
 ---
 
@@ -97,46 +110,38 @@ See `~/Projects/ENGINEERING-PRINCIPLES.md` for full philosophy.
 
 ## 🎨 UNIFIED PROGRESS UI
 
-**ONE structure for ALL transfers** - uploads and downloads use identical HTML.
+> ⚠️ UPDATED 2026-06-10 — this section previously documented `transfer-ui.js` /
+> `updateTransferUI` / `updateDownloadUI` and a `.progress-bar` > (no fill)
+> structure. **That code no longer exists.** All transfer rendering now lives in
+> ONE component: `lib/drive-item/drive-item.js` (`DriveItem`). The "one structure
+> for all transfers" principle is preserved — but by a single component, not
+> shared HTML helpers. Use the real markup below.
 
-### Progress Bar (correct):
+**ONE component renders ALL transfers** — `DriveItem._buildContentHTML()` handles
+uploads (shares) and downloads. There is no second renderer, so it cannot diverge
+the way the v0.14.1 incident did (see Lessons Learned below).
+
+### Actual progress markup (emitted by DriveItem):
 ```html
-<div class="transfer-progress">
-    <div class="progress-bar" style="width: 72%"></div>
+<div class="drive-item-progress">
+    <div class="drive-item-progress-bar">
+        <div class="drive-item-progress-fill" style="width: 72%"></div>
+    </div>
 </div>
 ```
 
-### Stats Line (correct):
-```html
-<div class="transfer-stats">
-    <span class="transfer-bytes">72 MB / 452 MB</span>
-    <span class="transfer-percent">72%</span>
-</div>
-```
+### Key CSS classes (all `drive-item-*`, defined in drive-item.js `_injectStyles`):
+- `.drive-item-progress-bar` - track
+- `.drive-item-progress-fill` - gets `width: X%`, gradient
+- `.drive-item-meta` / `.drive-item-meta-item` - size • files • % • speed row
+- `.drive-item-peers` / `.drive-item-peers-dot[.offline]` - peer indicator
 
-### ❌ WRONG - Don't do this:
-```html
-<!-- DON'T nest progress-fill inside progress-bar -->
-<div class="progress-bar">
-    <div class="progress-fill" style="width: 72%"></div>
-</div>
-
-<!-- DON'T use unstyled containers -->
-<div class="transfer-stats">
-    <span>72 MB / 452 MB</span>  <!-- missing class! -->
-</div>
-```
-
-### Key CSS Classes:
-- `.progress-bar` - Gets width %, has gradient background
-- `.transfer-stats` / `.transfer-footer` - Flex container, space-between
-- `.transfer-bytes` - 10px, 50% white
-- `.transfer-percent` - 10px, 70% white, bold
-
-### Update Functions:
-- `updateTransferUI(peerId, peer)` - For uploads
-- `updateDownloadUI(driveId, download)` - For downloads
-- Both use identical selectors: `.progress-bar`, `.transfer-bytes`, `.transfer-percent`
+### Rule (still in force):
+There must remain exactly ONE place that renders a transfer row. If you need a
+transfer rendered somewhere new, reuse `DriveItem` — do NOT hand-roll a second
+progress bar. Shared pure helpers (formatBytes/getFileIcon/escapeHtml) are
+currently duplicated across drive-item/drive-info-panel/renderer — consolidating
+them is a known TODO; don't add a 5th copy.
 
 ---
 
@@ -159,6 +164,43 @@ Copy-paste modification instead of single source of truth. Changed one, forgot t
 ### Rule Added
 > **If the same element appears in multiple places, it MUST be a single module.**
 > See `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #8
+
+---
+
+## 📚 Lessons Learned (v0.24.x - The "Shares Don't Announce" Hunt)
+
+Five bugs, one theme: **every failure lived at a seam between layers, and every
+layer swallowed errors and reported success.** The hyperdrive stack itself never
+failed once.
+
+### What Happened (2026-07-03)
+1. **Quit demoted every share.** `stopAll()` on quit persisted `state=PAUSED`
+   for all drives; boot only resumes `active`/`seeking`. Every graceful quit
+   permanently silenced every share. (Ctrl-C'd sessions survived — backwards.)
+2. **Resume was a stub.** The `drives-resume` handler had a literal
+   `TODO: rejoin swarm` and just flipped the manifest field.
+3. **The UI was blind.** Backend sends `state`; renderer read `status`;
+   paused/errored drives rendered as healthy "Sharing".
+4. **IPC argument shapes didn't match.** main destructures `{id}`; all four
+   pause/resume callers passed bare id strings → `{id: undefined}` → no-op.
+   `drives-pause` returned `success:true` even with a null result.
+5. **Transient boot failures were persisted as permanent.** A corestore fd-lock
+   (second running instance) marked drives ERRORED forever.
+
+### Rules Added
+> **IPC CONTRACT:** Drive operations take `{id, ...}` objects. `preload.js`
+> normalizes bare-string ids at the bridge. Handlers MUST return
+> `success:false` for no-ops — never report success for work not done.
+
+> **WIRING AUDIT:** After changing any IPC surface, run the audit: extract
+> every `ipcRenderer.invoke` channel from preload, every `ipcMain.handle` from
+> main, every `webContents.send` and `ipcRenderer.on`, and diff the sets.
+> Zero orphans in both directions, and spot-check argument shapes end-to-end
+> (caller → preload → handler destructure).
+
+> **STATE PERSISTENCE:** App lifecycle events (quit, boot, crash) must NEVER
+> change a drive's persisted state. Only explicit user actions (pause, resume,
+> remove) write state. Transient failures stay in-memory.
 
 ---
 
@@ -227,29 +269,36 @@ peardrop stop    # stop all shares
 ├── bin/peardrop               # CLI tool
 ├── CHANGELOG.md               # Version history
 └── lib/
-    ├── hyperdrive-manager.js  # 🔒 SACRED: Drive lifecycle, swarm, P2P
-    ├── drive-manager.js       # ✅ SAFE: Single source of truth for all drives
-    ├── downloader.js          # ✅ SAFE: Download orchestration
-    ├── file-utils.js          # ✅ SAFE: Pure file utilities
+    ├── hyperdrive-manager.js  # 🔒 SACRED: Drive lifecycle, swarm, P2P + state
+    ├── downloader.js          # ✅ SAFE: Download orchestration (safeJoin-guarded)
     ├── progress-tracker.js    # Upload tracking, events
-    └── transfer-ui.js         # ✅ SAFE: Reusable UI components (progress bars)
+    ├── file-utils.js          # ✅ SAFE: Pure file utilities (incl. safeJoin)
+    ├── drive-actions.js       # ✅ SAFE: menu action -> IPC adapter (renderer)
+    ├── ui-utils.js            # ✅ SAFE: shared browser helpers (window.PearUtils)
+    ├── scroll-list/           # ✅ SAFE: list container (browser global)
+    ├── drive-item/            # ✅ SAFE: transfer-row + info-panel (browser global)
+    ├── qr-scanner/            # ✅ SAFE: QR generate/scan (browser global)
+    └── logger.js              # debug logging
 ```
 
-### DriveManager (v0.17.0) - Single Source of Truth
+> ☠️ REMOVED (2026-07-02, recoverable from git history): `lib/migration.js`,
+> `lib/manifest-recovery.js`, `lib/_graveyard/`. Do NOT reintroduce recovery
+> logic that deletes manifest entries or drive folders — see Manifest Loading.
 
-**File:** `~/peardrop/drives.json`
+### Single Source of Truth (corrected 2026-06-10)
 
-**API:**
-- `add(drive)` - Add a new drive (upload or download)
-- `remove(id, opts)` - Remove completely (storage + optional files)
-- `pause(id)` - Stop seeding, keep data
-- `resume(id)` - Resume seeding
-- `get(id)` / `getAll()` / `getByKey(key)` - Queries
+> ⚠️ The old `drive-manager.js` / `~/peardrop/drives.json` "DriveManager" no
+> longer exists (deleted; recoverable from git history). Do not reintroduce it.
+> The live source of truth is below.
 
-**States:**
-- `active` - Currently seeding/available on network
-- `paused` - Not seeding, but can resume
-- `local` - Only local files exist (no hyperdrive data)
+**Owner:** `HyperdriveManager` (`lib/hyperdrive-manager.js`).
+**File:** `~/peardrop/drives-state.json` — written atomically (temp + rename) by
+`_saveManifest()`, loaded by the simple non-destructive loader in `_loadManifest()`.
+**Wire manifest (separate, legitimate):** `/.peardrop.json` inside each drive —
+the P2P metadata a receiver reads (file names/sizes). Distinct from local state.
+
+**Drive states** (`DriveState` in hyperdrive-manager.js): `creating`, `active`,
+`paused`, `seeking` (download in progress / awaiting peer), `errored`.
 
 **Rule:** If it's in the Shares list → it exists. Remove from list → completely deleted.
 
@@ -261,13 +310,13 @@ peardrop stop    # stop all shares
 **✅ SAFE (can modify freely):**
 - `downloader.js`: File writing, naming, progress callbacks
 - `file-utils.js`: getUniqueFilePath, ensureDir, formatBytes
+- `ui-utils.js`: shared browser helpers (formatBytes, getFileIcon, escapeHtml…)
 - `renderer.js`: UI only
 - `index.html`: Styles only
-- `manifest-recovery.js`: Robust manifest recovery and validation (v0.19.1)
 
 ### Storage Locations
 - `~/peardrop/drives/` - Hyperdrive corestore data (per-drive directories)
-- `~/peardrop/drives-state.json` - Persistent drive tracking with recovery support (v0.19.1)
+- `~/peardrop/drives-state.json` - Persistent drive tracking (atomic writes)
 - `~/peardrop/downloads/` - Downloaded files land here
 - `/.peardrop.json` (inside drives) - Share metadata for receivers
 
@@ -282,26 +331,24 @@ peardrop stop    # stop all shares
 3. **Manifest-first download** - Read manifest before downloading files
 4. **Blobs core hook** - Track download progress via `blobs.core.on('download')`
 5. **Background sharing** - Use `nohup` to keep shares alive
-6. **Bulletproof manifest recovery** (v0.19.1) - Isolated recovery system with fallback strategies
+6. **Simple, non-destructive manifest loading** (2026-07-02) - see below
 
-### Manifest Recovery System (v0.19.1)
+### Manifest Loading (2026-07-02 — REPLACED the recovery system)
 
-**File:** `lib/manifest-recovery.js` - Isolated module for robust drives-state.json handling
+The `ManifestRecovery` system and `lib/migration.js` were **deleted entirely**.
+Its `validateOnly()` pruned every manifest entry whose drive folder it couldn't
+see — so one transient failure to read `~/peardrop/drives/` wiped the whole
+share list. This caused the cascading loss of good, working shares.
 
-**Recovery Strategies (in order):**
-1. **Normal load** - Try standard JSON.parse first
-2. **Partial recovery** - Extract valid drive entries from corrupted JSON using regex
-3. **Complete rebuild** - Scan all Corestore folders and reconstruct metadata
-4. **Empty fallback** - Return clean manifest if all strategies fail
+The loader is now inline in `HyperdriveManager._loadManifest()`:
+1. Parse `drives-state.json`. Valid → use as-is. **Never prunes entries.**
+2. Missing file → start with empty manifest (first run).
+3. Corrupt file → back it up alongside (`.corrupted.<ts>`), start empty.
+4. **NEVER touches drive folders on disk.**
 
-**Key Methods:**
-- `loadWithRecovery()` - Main entry point, tries all strategies automatically
-- `validateAndSync()` - Ensures manifest ↔ drive folders consistency
-- `rebuildFromDrives()` - Scans `CORESTORE` folders to rebuild complete state
-- `scanDriveFolder(driveId)` - Extracts metadata from individual drive folder
-- `cleanupOrphans()` - Removes orphaned drives/manifest entries
-
-**Integration:** HyperdriveManager uses ManifestRecovery for all manifest operations instead of basic `fs.readFile()`
+**RULE:** Any future recovery/rebuild tool must be designed from scratch,
+read-only-by-default, and must never delete manifest entries or drive folders
+automatically. Deletion only with explicit per-item user confirmation.
 
 ---
 
@@ -385,19 +432,57 @@ Result: Backdrop (9999 at root) beats menu (10000 inside a z-50 context). Menu i
 - **Container:** `position: relative` only — NO z-index
 - **Active item elevation:** `.menu-open` class adds `z-index: 1000` to DriveItem when menu is open, lifting it above sibling DriveItems so their buttons don't cover the menu
 
-See `ARCHITECTURE.md` for full component layer documentation.
+---
+
+## 🧱 Component Architecture (absorbed from ARCHITECTURE.md, 2026-07-03)
+
+**Philosophy: blocks inside blocks.** Every component owns its block of space.
+Parents provide empty slots; children control everything inside their slot; no
+component reaches outside its block or manipulates another's internals.
+
+```
+App Window
+└── ScrollList         — creates/manages empty slots, scrolling, reordering.
+    │                    Does NOT know slot contents. NO z-index (traps menus).
+    └── DriveItem      — renders one transfer row, owns its context menu,
+        │                emits 'action' events. Adds .menu-open (z:1000) to
+        │                elevate itself above sibling rows while menu is open.
+        └── DriveActions — maps action names → electronAPI calls. No DOM
+                           knowledge; receives the API as a parameter.
+```
+
+**Event flow (one direction, one path):**
+DriveItem emits `action` → renderer → `DriveActions.handleAction(api, action,
+data)` → preload → main IPC → HyperdriveManager → result back up → renderer
+updates the item. Never bypass this chain with a side channel.
+
+**Menu test checklist (after ANY UI change):**
+- [ ] 3-dot menu opens; items clickable; pointer cursor on hover
+- [ ] Menu closes on outside click / Escape
+- [ ] Menu renders ABOVE sibling rows (the .menu-open elevation)
+- [ ] Confirm dialogs appear above everything
 
 ---
 
 ## What's Next (Future Work)
 
-From Guy's roadmap:
+From Guy's roadmap (absorbed from ROADMAP.md, 2026-07-03):
 1. **iOS/Android clients** - Before download history UI
 2. **Receive links** - QR code for others to send TO you
-3. **Spaces integration** - Group sharing via pearcore
+3. **Device cloud** (pearcore) - Link your own devices via key attestation so
+   they assist each other's transfers. Key decision (2026-03-28): account
+   space is created LAZILY — only when the user first clicks "Add Device",
+   never at first launch (avoids orphan spaces + DHT pollution).
 4. **Download history** - Track past transfers
 
-See `PROPOSAL-metadata-layer.md` for pearcore signaling layer design.
+**Known open bug (needs sacred approval): share double-write** — `createDrive`
+writes a manifest entry, then main.js `hyperdrive-share` calls `addDriveEntry`
+which overwrites it with a different shape, discarding `discoveryKey`/
+`expiresAt`/per-file `addedAt`. Two writers, one truth. Fix before/at publish.
+
+**Scope guard (settled in the v1 proposal — do NOT re-add):** no friend lists,
+no identity systems, no whitelist trust, no push notifications, no Nostr. Those
+belong to PearDrive proper. PearDrop = link sharing + (later) own-device cloud.
 
 ---
 

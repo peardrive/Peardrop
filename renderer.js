@@ -86,6 +86,9 @@ let currentDriveId = null;      // Active drive ID
 let drives = [];                // All drives from HyperdriveManager
 let driveItems = new Map();     // driveId -> DriveItem instance
 let scrollList = null;          // ScrollList instance
+// Upload aggregation: driveId -> { peers: Set<peerId>, totalSpeed, lastUpdate, hadTransfer }
+// The Set<peerId> is the SINGLE source of truth for peer count; drive.peers mirrors it.
+let uploadTracking = new Map();
 
 // Sort state
 let sortField = 'recent';       // recent | status | size | custom
@@ -261,7 +264,10 @@ function init() {
 function getPresetForDrive(drive) {
     // Determine base preset type
     if (drive.progress != null && drive.progress < 1) {
-        // Active download
+        // Active download with progress
+        return isExpandedView ? 'download' : 'downloadCompact';
+    } else if (drive.state === 'seeking') {
+        // Seeking downloads (connecting to peers)
         return isExpandedView ? 'download' : 'downloadCompact';
     } else if (drive.type === 'upload' || drive.type === 'share' || drive.status === 'sharing') {
         // Share/upload
@@ -418,15 +424,19 @@ function bindQrUpload() {
 }
 
 function handleScannedLink(text) {
-    if (!text.startsWith('peardrop://')) {
+    const link = (text || '').trim();
+    if (!link.startsWith('peardrop://')) {
         showToast('QR doesn\'t contain a PearDrop link', 'error');
         return;
     }
-    linkInput.value = text;
+    linkInput.value = link;
     linkInput.classList.add('flash');
     setTimeout(() => linkInput.classList.remove('flash'), 500);
-    showToast('Link captured', 'success');
-    //startDownload(); // a plan for later on
+    // QR scanning is a "retrieve" action — fetch immediately rather than just
+    // populating the field. startDownload() validates the key and is a no-op if
+    // it's already in flight / a duplicate.
+    showToast('Link captured — starting download', 'success');
+    startDownload();
 }
 
 async function startShare() {
@@ -1035,6 +1045,17 @@ async function loadDrives() {
     }
 }
 
+// Backend DriveState -> DriveItem display status.
+// (Fixed 2026-07-03: backend sends `state`, but this read `drive.status`,
+// so paused/errored drives silently rendered as healthy "Sharing".)
+const STATE_TO_STATUS = {
+    active: 'sharing',
+    paused: 'paused',
+    errored: 'error',
+    seeking: 'connecting',
+    creating: 'connecting'
+};
+
 function normalizeDrive(drive) {
     return {
         id: drive.id || drive.driveId,
@@ -1042,7 +1063,7 @@ function normalizeDrive(drive) {
         size: drive.totalBytes || drive.size || 0,
         fileCount: drive.fileCount || drive.files?.length || 1,
         files: drive.files || [],
-        status: drive.status || 'sharing',
+        status: drive.status || STATE_TO_STATUS[drive.state] || 'sharing',
         progress: drive.progress,
         speed: drive.speed,
         peers: drive.peers || 0,
@@ -1052,32 +1073,109 @@ function normalizeDrive(drive) {
 }
 
 // ============================================================================
+// UPLOAD AGGREGATION
+// ============================================================================
+
+/**
+ * Aggregate upload data from multiple peers for cleaner display
+ * @param {string} driveId - Drive being uploaded from
+ * @param {string} peerId - Peer downloading 
+ * @param {Object} data - Progress data with speed, percent, etc.
+ */
+function updateUploadAggregation(driveId, peerId, data) {
+    console.log('[Renderer] updateUploadAggregation called:', { driveId, peerId, data });
+    const item = driveItems.get(driveId);
+    if (!item) return;
+    
+    // Get or create aggregation for this drive
+    if (!uploadTracking.has(driveId)) {
+        uploadTracking.set(driveId, {
+            peers: new Set(),
+            totalSpeed: 0,
+            lastUpdate: Date.now(),
+            hadTransfer: false
+        });
+    }
+
+    const tracking = uploadTracking.get(driveId);
+    const speed = parseSpeed(data.speedFormatted);
+
+    // Add this peer and update total speed
+    tracking.peers.add(peerId);
+    tracking.totalSpeed = speed; // For now, use latest speed (could sum all peers later)
+    tracking.lastUpdate = Date.now();
+    tracking.hadTransfer = true;
+
+    // Update UI with aggregated data
+    const peerCount = tracking.peers.size;
+    const drive = drives.find(d => d.id === driveId);
+    if (drive) drive.peers = peerCount; // keep derived mirror in sync
+    const displayStatus = peerCount > 0 ? 'sharing' : 'complete';
+    
+    item.update({ 
+        status: displayStatus,
+        speed: tracking.totalSpeed,
+        peers: peerCount,
+        uploadText: peerCount > 0 ? `${peerCount} peer${peerCount > 1 ? 's' : ''} downloading` : null
+    });
+}
+
+// ============================================================================
 // IPC EVENT HANDLERS
 // ============================================================================
 
 function bindIPC() {
-    // Peer connections
+    // Peer connections.
+    // SINGLE SOURCE OF TRUTH: uploadTracking's Set<peerId> is the only peer
+    // counter. `drive.peers` is a derived mirror (kept for sort/filter reads).
+    // Previously a parallel `drive.peers++/--` counter had no peerId dedup and
+    // could drift from the Set — two sources of truth for the same number.
     window.electronAPI.onPeerConnected?.((event, data) => {
-        const driveId = data.driveId;
+        const { driveId, peerId } = data;
         const item = driveItems.get(driveId);
-        if (item) {
-            const drive = drives.find(d => d.id === driveId);
-            if (drive) {
-                drive.peers = (drive.peers || 0) + 1;
-                item.update({ peers: drive.peers });
-            }
+        if (!item) return;
+
+        if (!uploadTracking.has(driveId)) {
+            uploadTracking.set(driveId, {
+                peers: new Set(),
+                totalSpeed: 0,
+                lastUpdate: Date.now(),
+                hadTransfer: false
+            });
         }
+        const tracking = uploadTracking.get(driveId);
+        if (peerId) tracking.peers.add(peerId);
+        tracking.lastUpdate = Date.now();
+
+        const peerCount = tracking.peers.size;
+        const drive = drives.find(d => d.id === driveId);
+        if (drive) drive.peers = peerCount;
+        item.update({ peers: peerCount });
     });
-    
+
     window.electronAPI.onPeerDisconnected?.((event, data) => {
-        const driveId = data.driveId;
+        const { driveId, peerId } = data;
         const item = driveItems.get(driveId);
-        if (item) {
-            const drive = drives.find(d => d.id === driveId);
-            if (drive && drive.peers > 0) {
-                drive.peers--;
-                item.update({ peers: drive.peers });
-            }
+        if (!item) return;
+
+        const tracking = uploadTracking.get(driveId);
+        if (tracking && peerId) tracking.peers.delete(peerId);
+        const peerCount = tracking ? tracking.peers.size : 0;
+
+        const drive = drives.find(d => d.id === driveId);
+        if (drive) drive.peers = peerCount;
+
+        if (peerCount > 0) {
+            item.update({
+                peers: peerCount,
+                uploadText: `${peerCount} peer${peerCount > 1 ? 's' : ''} downloading`
+            });
+        } else if (tracking && tracking.hadTransfer) {
+            // Last active uploader left after a real transfer
+            item.update({ peers: 0, status: 'complete', speed: 0, uploadText: null });
+        } else {
+            // Peer left without transferring — back to idle, don't mark complete
+            item.update({ peers: 0, speed: 0, uploadText: null });
         }
     });
     
@@ -1085,6 +1183,7 @@ function bindIPC() {
     // Data format from downloader: { driveId, peerId, percent, bytesFormatted, totalFormatted, speedFormatted }
     window.electronAPI.onUploadProgress?.((event, data) => {
         log('Progress event:', data);
+        console.log('[Renderer] Received upload-progress event:', data);
         const { driveId, peerId, percent, speedFormatted } = data;
         const item = driveItems.get(driveId);
         if (!item) {
@@ -1106,12 +1205,8 @@ function bindIPC() {
                 speed: speed
             });
         } else {
-            // This is an upload (someone downloading from us)
-            const speed = parseSpeed(speedFormatted);
-            item.update({ 
-                status: 'sharing',
-                speed: speed
-            });
+            // This is an upload (someone downloading from us) - aggregate peer data
+            updateUploadAggregation(driveId, peerId, data);
         }
     });
     
@@ -1129,10 +1224,27 @@ function bindIPC() {
         }
     });
     
+    // Resumed drive ready to download - trigger download for interrupted transfers
+    window.electronAPI.onDriveReadyToDownload?.((event, data) => {
+        const { driveId, shareLink, shareName } = data;
+        console.log('[PearDrop] Renderer received drive-ready-to-download event:', { driveId, shareLink, shareName });
+        
+        // Update drive display to show downloading state
+        updateDriveInList({
+            id: driveId,
+            status: 'downloading',
+            title: shareName || 'Download'
+        });
+        
+        // Trigger download using the same path as new downloads
+        console.log('[PearDrop] Triggering handleDownload for resumed drive:', driveId);
+        handleDownload(driveId, shareLink);
+    });
+    
     // Drives updated (from HyperdriveManager)
     window.electronAPI.onDrivesUpdated?.((event, data) => {
         if (data.action === 'loaded') {
-            // Complete drives list loaded (e.g., after migration or startup)
+            // Complete drives list loaded (e.g., at startup)
             console.log('[PearDrop] Drives loaded, refreshing list:', data.drives?.length || 0);
             if (data.drives) {
                 for (const drive of data.drives) {
@@ -1198,12 +1310,9 @@ function bindIPC() {
 // UTILITIES
 // ============================================================================
 
+// Shared formatting from lib/ui-utils.js (window.PearUtils, loaded first).
 function formatFileSize(bytes) {
-    if (bytes == null || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    return PearUtils.formatBytes(bytes);
 }
 
 // Parse speed string like "1.5 MB/s" back to bytes/sec
@@ -1594,23 +1703,7 @@ function applyThumbnail(thumbEl, value) {
 }
 
 function getFileIcon(filename) {
-    if (!filename) return '📄';
-    const ext = filename.split('.').pop()?.toLowerCase();
-    const icons = {
-        // Images
-        jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', webp: '🖼️', svg: '🖼️',
-        // Video
-        mp4: '🎬', mov: '🎬', avi: '🎬', mkv: '🎬', webm: '🎬',
-        // Audio
-        mp3: '🎵', wav: '🎵', ogg: '🎵', flac: '🎵', m4a: '🎵',
-        // Documents
-        pdf: '📕', doc: '📘', docx: '📘', txt: '📄', md: '📝',
-        // Archives
-        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
-        // Code
-        js: '⚙️', ts: '⚙️', py: '🐍', html: '🌐', css: '🎨', json: '📋'
-    };
-    return icons[ext] || '📄';
+    return PearUtils.getFileIcon(filename);
 }
 
 const TOAST_ICONS = {
@@ -1641,6 +1734,11 @@ function showToast(message, type = 'info') {
         toast.classList.remove('visible');
     }, 3000);
 }
+
+// Expose for components loaded as browser globals (e.g. qr-scanner.js calls
+// window.showToast on image-decode failure). Without this the scanner's error
+// feedback was silently dropped.
+window.showToast = showToast;
 
 // ============================================================================
 // PROFILE & LIST MENU
@@ -1839,14 +1937,17 @@ async function pauseAllTransfers() {
 }
 
 async function resumeAllTransfers() {
-    const pausedDrives = drives.filter(d => d.status === 'paused');
-    
+    // Include errored drives — resume retries them (errors are usually
+    // transient, e.g. a boot-time fd lock from a second instance)
+    const pausedDrives = drives.filter(d => d.status === 'paused' || d.status === 'error');
+
     if (pausedDrives.length === 0) {
         showToast('No paused transfers to resume', 'info');
         return;
     }
     
     let resumed = 0;
+    let failed = 0;
     for (const drive of pausedDrives) {
         try {
             const result = await window.electronAPI.drivesResume?.(drive.id);
@@ -1854,13 +1955,22 @@ async function resumeAllTransfers() {
                 const status = drive.type === 'share' ? 'sharing' : 'downloading';
                 updateDriveInList({ id: drive.id, status });
                 resumed++;
+            } else {
+                failed++;
+                console.error('Failed to resume:', drive.id, result?.error);
             }
         } catch (err) {
+            failed++;
             console.error('Failed to resume:', drive.id, err);
         }
     }
-    
-    showToast(`Resumed ${resumed} transfer${resumed !== 1 ? 's' : ''}`, 'success');
+
+    // Report failures honestly — a silent "0 resumed" hides real errors
+    if (failed > 0) {
+        showToast(`Resumed ${resumed}, failed ${failed} — see console/logs`, 'error');
+    } else {
+        showToast(`Resumed ${resumed} transfer${resumed !== 1 ? 's' : ''}`, 'success');
+    }
 }
 
 async function clearCompletedTransfers() {
