@@ -1,13 +1,10 @@
 /**
  * DriveInfoPanel - macOS-style info panel for drive details
- * 
  * @module DriveInfoPanel
  * @version 1.0.0
- * 
  * EXPORTS:
- *   - DriveInfoPanel (class) - Modal info panel
- *   - showDriveInfo(data) - Quick function to show panel
- * 
+ * DriveInfoPanel (class) - Modal info panel
+ * showDriveInfo(data) - Quick function to show panel
  * USAGE:
  *   const panel = new DriveInfoPanel();
  *   panel.show({

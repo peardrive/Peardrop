@@ -1,35 +1,27 @@
 /**
  * ScrollList - Universal Slot-Based Scrolling Container
- * 
  * A standalone container that manages slots for child components.
  * ScrollList handles scrolling, ordering, reordering.
  * Child components control their own rendering inside slots.
- * 
  * @module ScrollList
  * @version 2.0.0
- * 
  * ARCHITECTURE:
- *   - ScrollList creates empty slot containers
- *   - Child components mount into slots and own their content
- *   - "Blocks inside blocks" - each layer controls its own space
- * 
+ * ScrollList creates empty slot containers
+ * Child components mount into slots and own their content
+ * "Blocks inside blocks" - each layer controls its own space
  * EXPORTS:
- *   - ScrollList (class)
- * 
+ * ScrollList (class)
  * EVENTS EMITTED:
- *   - 'slot:created'   — { id, slot, index }
- *   - 'slot:removed'   — { id }
- *   - 'slot:reordered' — { id, fromIndex, toIndex }
- *   - 'scroll'         — { scrollTop, scrollHeight, clientHeight }
- *   - 'empty'          — List became empty
- * 
+ * 'slot:created' — { id, slot, index }
+ * 'slot:removed' — { id }
+ * 'slot:reordered' — { id, fromIndex, toIndex }
+ * 'scroll' — { scrollTop, scrollHeight, clientHeight }
+ * 'empty' — List became empty
  * DEPENDENCIES: None (pure DOM)
- * 
  * USAGE (Slot-based):
  *   const list = new ScrollList(container);
  *   const slot = list.createSlot({ id: 'item_1' });
  *   const item = new DriveItem(slot, { data: {...} });
- * 
  * USAGE (Factory-based):
  *   const list = new ScrollList(container, {
  *     itemFactory: (slot, data) => new DriveItem(slot, { data })

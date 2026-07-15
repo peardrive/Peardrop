@@ -5,18 +5,15 @@
  *          qr-scanner). Eliminates the previous 3-4x duplication of these
  *          functions, which was the exact "copy-paste then diverge" failure
  *          mode CLAUDE.md warns about.
- *
  * LOAD ORDER: must be the FIRST <script> in index.html, before any component
  *          that delegates to it (scroll-list, drive-item, etc.).
- *
  * EXPORTS (via window.PearUtils, also module.exports for Node unit tests):
- *   - formatBytes(bytes)        - "1.5 MB"
- *   - formatSpeed(bytesPerSec)  - "1.5 MB/s" (UI-tuned precision; '' for 0)
- *   - getFileIcon(filename)     - emoji for a file extension
- *   - escapeHtml(text)          - HTML-escape (also escapes quotes -> safe in
+ * formatBytes(bytes) - "1.5 MB"
+ * formatSpeed(bytesPerSec) - "1.5 MB/s" (UI-tuned precision; '' for 0)
+ * getFileIcon(filename) - emoji for a file extension
+ * escapeHtml(text) - HTML-escape (also escapes quotes -> safe in
  *                                 attribute contexts, unlike the old DOM impl)
- *   - truncateMiddle(str, max)  - "long…name"
- *
+ * truncateMiddle(str, max) - "long…name"
  * KEY STATE: none (pure functions)
  */
 (function (root) {

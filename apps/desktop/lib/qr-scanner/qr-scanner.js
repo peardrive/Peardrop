@@ -2,24 +2,20 @@
  * MODULE: lib/qr-scanner/qr-scanner.js
  * PURPOSE: Camera + file QR scanner modal for reading peardrop:// links
  * VERSION: 0.1.0
- *
  * EXPORTS (global):
- *   - window.openQrScanner({ onResult })
- *
+ * window.openQrScanner({ onResult })
  * DEPENDENCIES:
- *   - window.jsQR (loaded via node_modules/jsqr/dist/jsQR.js)
- *   - window.showToast (renderer.js, optional)
- *
+ * window.jsQR (loaded via node_modules/jsqr/dist/jsQR.js)
+ * window.showToast (renderer.js, optional)
  * DOM ELEMENTS USED:
- *   - #qrScannerModal, #qrScannerVideo, #qrScannerStatus, #qrScannerCloseBtn
- *   - #qrCameraSelect, #qrPickFileBtn, #qrFileInput
- *
+ * #qrScannerModal, #qrScannerVideo, #qrScannerStatus, #qrScannerCloseBtn
+ * #qrCameraSelect, #qrPickFileBtn, #qrFileInput
  * BEHAVIOR:
- *   - Opens modal, starts default camera via getUserMedia()
- *   - Scans frames with jsQR on requestAnimationFrame
- *   - Camera dropdown auto-hides when 0 or 1 video device available
- *   - "Select file with QR" path uses #qrFileInput (image/*)
- *   - Cleanup (stop tracks, cancel rAF) on close, decode success, X click,
+ * Opens modal, starts default camera via getUserMedia()
+ * Scans frames with jsQR on requestAnimationFrame
+ * Camera dropdown auto-hides when 0 or 1 video device available
+ * "Select file with QR" path uses #qrFileInput (image/*)
+ * Cleanup (stop tracks, cancel rAF) on close, decode success, X click,
  *     backdrop click, ESC key
  */
 (function () {

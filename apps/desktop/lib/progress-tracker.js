@@ -1,31 +1,26 @@
 /**
  * MODULE: lib/progress-tracker.js
  * PURPOSE: Track upload/download progress, emit events for UI updates
- * 
  * EXPORTS:
- *   - ProgressTracker (class) - Progress tracking with events
- *   - tracker (instance) - Singleton for app-wide use
- *   - formatBytes(bytes) - Format bytes as "1.2 MB"
- *   - formatSpeed(bps) - Format speed as "1.2 MB/s"
- * 
+ * ProgressTracker (class) - Progress tracking with events
+ * tracker (instance) - Singleton for app-wide use
+ * formatBytes(bytes) - Format bytes as "1.2 MB"
+ * formatSpeed(bps) - Format speed as "1.2 MB/s"
  * FUNCTIONS (ProgressTracker):
- *   - trackUploads(driveId, drive, totalBytes) - Track peers downloading from us
- *   - stopTracking(driveId) - Stop tracking a drive
+ * trackUploads(driveId, drive, totalBytes) - Track peers downloading from us
+ * stopTracking(driveId) - Stop tracking a drive
  *   (download progress is tracked in lib/downloader.js, not here)
- *   - getActiveTransfers() - Get all active transfer states
- *   - clear() - Clear all tracking data
- * 
+ * getActiveTransfers() - Get all active transfer states
+ * clear() - Clear all tracking data
  * EVENTS EMITTED:
- *   - 'peer-connected' - { peerId, driveId }
- *   - 'peer-disconnected' - { peerId, driveId }
- *   - 'progress' - { peerId, driveId, bytesTransferred, totalBytes, percent, speed }
- *   - 'complete' - { peerId, driveId, totalBytes, duration }
- * 
+ * 'peer-connected' - { peerId, driveId }
+ * 'peer-disconnected' - { peerId, driveId }
+ * 'progress' - { peerId, driveId, bytesTransferred, totalBytes, percent, speed }
+ * 'complete' - { peerId, driveId, totalBytes, duration }
  * EXTERNAL CALLS: None (standalone)
- * 
  * KEY STATE:
- *   - transfers (Map) - "driveId:peerId" -> transfer state
- *   - peersByDrive (Map) - driveId -> Set of peerIds
+ * transfers (Map) - "driveId:peerId" -> transfer state
+ * peersByDrive (Map) - driveId -> Set of peerIds
  */
 
 const { EventEmitter } = require('events')
@@ -43,7 +38,6 @@ class ProgressTracker extends EventEmitter {
 
   /**
    * Start tracking uploads for a drive (sender side)
-   * 
    * @param {string} driveId - Drive identifier
    * @param {Hyperdrive} drive - The Hyperdrive instance
    * @param {number} totalBytes - Total bytes to transfer

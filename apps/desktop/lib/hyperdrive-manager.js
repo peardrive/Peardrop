@@ -1,65 +1,56 @@
 /**
  * MODULE: lib/hyperdrive-manager.js
  * PURPOSE: Manages Hyperdrive lifecycle for P2P file sharing
- * 
  * EXPORTS:
- *   - HyperdriveManager (class) - Main manager class
- *   - manager (instance) - Singleton for app-wide use
- *   - DriveState (enum) - CREATING, ACTIVE, PAUSED, ERRORED
- * 
+ * HyperdriveManager (class) - Main manager class
+ * manager (instance) - Singleton for app-wide use
+ * DriveState (enum) - CREATING, ACTIVE, PAUSED, ERRORED
  * FUNCTIONS:
  *   Core P2P:
- *     - init() - Load state, ensure directories, cleanup incomplete, resume active
- *     - createDrive(files, options) - Create share with manifest, join swarm
- *     - openDrive(shareLink) - Connect to remote drive, read manifest
- *     - stopDrive(driveId, options) - Leave swarm, close drive; opts: delete, persistState
- *     - stopAll(options) - Stop all active drives
- *     - getStatus() - Return active/stopped drives and stats
- *     - cleanupManifest() - Remove deleted entries from manifest
- *   
+ * init() - Load state, ensure directories, cleanup incomplete, resume active
+ * createDrive(files, options) - Create share with manifest, join swarm
+ * openDrive(shareLink) - Connect to remote drive, read manifest
+ * stopDrive(driveId, options) - Leave swarm, close drive; opts: delete, persistState
+ * stopAll(options) - Stop all active drives
+ * getStatus() - Return active/stopped drives and stats
+ * cleanupManifest() - Remove deleted entries from manifest
  *   UI Interface (DriveManager compatibility):
- *     - addDriveEntry(data) - Add drive with UI-friendly data
- *     - removeDriveEntry(id, opts) - Remove drive entry + optional file/storage cleanup
- *     - updateDriveEntry(id, updates) - Update drive entry data
- *     - pauseDriveEntry(id) - Mark drive as paused (UI state)
- *     - resumeDrive(id) - Re-open drive, rejoin swarm, persist ACTIVE
- *     - getDriveEntry(id) - Get single drive by ID
- *     - getAllDriveEntries() - Get all drives as array
- *     - getDriveEntryByKey(key) - Find drive by hyperdrive key (dedup)
- *     - checkLocalAvailability(id) - Check if local files exist
- *   
+ * addDriveEntry(data) - Add drive with UI-friendly data
+ * removeDriveEntry(id, opts) - Remove drive entry + optional file/storage cleanup
+ * updateDriveEntry(id, updates) - Update drive entry data
+ * pauseDriveEntry(id) - Mark drive as paused (UI state)
+ * resumeDrive(id) - Re-open drive, rejoin swarm, persist ACTIVE
+ * getDriveEntry(id) - Get single drive by ID
+ * getAllDriveEntries() - Get all drives as array
+ * getDriveEntryByKey(key) - Find drive by hyperdrive key (dedup)
+ * checkLocalAvailability(id) - Check if local files exist
  *   Resume (called by init):
- *     - _resumeActiveDrives() - Resume all ACTIVE drives from state
- *     - _resumeDrive(driveId, metadata) - Resume single drive, rejoin swarm
- *   
+ * _resumeActiveDrives() - Resume all ACTIVE drives from state
+ * _resumeDrive(driveId, metadata) - Resume single drive, rejoin swarm
  *   File Operations (for UI):
- *     - setDownloadedFiles(driveId, files, destDir) - Store downloaded file paths
- *     - getDriveInfo(driveId) - Get drive metadata and file paths
- *     - openFile(driveId) - Open first file in default app
- *     - showInFolder(driveId) - Show file in Finder/Explorer
- *     - openDownloadsFolder() - Open ~/peardrop/downloads
- * 
+ * setDownloadedFiles(driveId, files, destDir) - Store downloaded file paths
+ * getDriveInfo(driveId) - Get drive metadata and file paths
+ * openFile(driveId) - Open first file in default app
+ * showInFolder(driveId) - Show file in Finder/Explorer
+ * openDownloadsFolder() - Open ~/peardrop/downloads
  * EVENTS EMITTED:
- *   - 'peer-connected' - { driveId, peerId }
- *   - 'peer-disconnected' - { driveId, peerId }
- *   - 'upload-progress' - { driveId, peerId, percent, bytesTransferred... }
- *   - 'upload-complete' - { driveId, peerId, totalBytes, duration }
- *   - 'drive-created' - { driveId, shareLink, metadata }
- *   - 'drive-stopped' - { driveId, deleted }
- * 
+ * 'peer-connected' - { driveId, peerId }
+ * 'peer-disconnected' - { driveId, peerId }
+ * 'upload-progress' - { driveId, peerId, percent, bytesTransferred... }
+ * 'upload-complete' - { driveId, peerId, totalBytes, duration }
+ * 'drive-created' - { driveId, shareLink, metadata }
+ * 'drive-stopped' - { driveId, deleted }
  * EXTERNAL CALLS:
- *   - Corestore, Hyperdrive, Hyperswarm (holepunch P2P stack)
- *   - ./progress-tracker.js (tracker singleton)
- * 
+ * Corestore, Hyperdrive, Hyperswarm (holepunch P2P stack)
+ * ./progress-tracker.js (tracker singleton)
  * KEY STATE:
- *   - activeDrives (Map) - driveId -> { drive, store, swarm, metadata }
- *   - manifest (Object) - Persistent tracking: drives{}, stats{}
- * 
+ * activeDrives (Map) - driveId -> { drive, store, swarm, metadata }
+ * manifest (Object) - Persistent tracking: drives{}, stats{}
  * KEY CONSTANTS:
- *   - DRIVE_MANIFEST_PATH - '/.peardrop.json' (in-drive metadata)
- *   - DRIVES_STATE_FILE - ~/peardrop/drives-state.json (local tracking)
- *   - PEARDROP_DIR - ~/peardrop
- *   - DRIVES_DIR - ~/peardrop/drives
+ * DRIVE_MANIFEST_PATH - '/.peardrop.json' (in-drive metadata)
+ * DRIVES_STATE_FILE - ~/peardrop/drives-state.json (local tracking)
+ * PEARDROP_DIR - ~/peardrop
+ * DRIVES_DIR - ~/peardrop/drives
  */
 
 const Corestore = require('corestore')
@@ -70,6 +61,8 @@ const path = require('path')
 const os = require('os')
 const { EventEmitter } = require('events')
 const { tracker } = require('./progress-tracker')
+const { computeTruncation } = require('./file-utils')
+const { EngineError } = require('./engine-errors')
 
 // For file operations
 let shell = null
@@ -192,12 +185,11 @@ class HyperdriveManager extends EventEmitter {
 
   /**
    * Create a new drive for sharing files
-   * 
    * @param {Array<{name: string, path: string, size: number}>} files - Files to share
    * @param {Object} options - Share options
+   * @param {number} options.ttlMs - Time-to-live in milliseconds (0 = indefinite)
    * @param {string} options.name - Optional friendly name for the share
-   * @returns {Promise<{driveId: string, shareLink: string, key: string, entry: Object}>}
-   *   entry = the canonical manifest record (createDrive is the ONLY writer for it)
+   * @returns {Promise<{driveId: string, shareLink: string, key: string}>}
    */
   async createDrive(files, options = {}) {
     if (!this.initialized) await this.init()
@@ -218,29 +210,19 @@ class HyperdriveManager extends EventEmitter {
     const key = drive.key.toString('hex')
     const discoveryKey = drive.discoveryKey.toString('hex')
     
-    // Record in manifest BEFORE adding files (so we can cleanup on failure).
-    // SINGLE WRITER (2026-07-03): this entry is the ONE canonical record for a
-    // share — a superset of the P2P truth (key/discoveryKey/state) and the UI
-    // fields (shareLink/localPath/isUpload/stats). The old second write from
-    // main.js's hyperdrive-share handler (addDriveEntry) overwrote this entry
-    // with a different shape, silently discarding discoveryKey and per-file
-    // in-drive paths. Do NOT add a second writer for share entries.
+    // Record in manifest BEFORE adding files (so we can cleanup on failure)
     const metadata = {
       driveId,
       key,
       discoveryKey,
-      shareLink: this._createShareLink(key),
       state: DriveState.CREATING,
       createdAt: Date.now(),
-      name: options.name || (files.length === 1
-        ? (files[0].name || path.basename(files[0].path))
-        : `${files.length} files`),
+      ttlMs: options.ttlMs || 0,
+      expiresAt: options.ttlMs ? Date.now() + options.ttlMs : null,
+      name: options.name || `Share ${driveId.slice(0, 8)}`,
       files: [],
       totalBytes: 0,
-      storagePath: drivePath,
-      localPath: files[0]?.path ? path.dirname(files[0].path) : null,
-      isUpload: true,
-      stats: { uploaded: 0, downloaded: 0, peers: 0 }
+      storagePath: drivePath
     }
     
     this.manifest.drives[driveId] = metadata
@@ -276,8 +258,7 @@ class HyperdriveManager extends EventEmitter {
         totalBytes += fileSize
         fileEntries.push({
           name: fileName,
-          storagePath: storagePath,   // path INSIDE the drive (what peers see)
-          path: file.path,            // local filesystem path (Open/Show in Folder)
+          storagePath: storagePath,
           size: fileSize,
           addedAt: Date.now()
         })
@@ -375,23 +356,27 @@ class HyperdriveManager extends EventEmitter {
         trackerHandlers: { onTrackerProgress, onTrackerComplete }
       }
       this.activeDrives.set(driveId, session)
-
-      // (TTL/expiration system REMOVED 2026-07-03 — it was never reachable
-      // from any UI/CLI, and shares must only end by explicit user action:
-      // pause or remove. Never auto-delete.)
-
-      const shareLink = metadata.shareLink
-
+      
+      // Set up TTL expiration if specified
+      if (options.ttlMs > 0) {
+        session.expirationTimer = setTimeout(() => {
+          console.log('[HyperdriveManager] Drive expired', { driveId })
+          this.stopDrive(driveId, { delete: true })
+        }, options.ttlMs)
+      }
+      
+      const shareLink = this._createShareLink(key)
+      
       console.log('[HyperdriveManager] Drive created and sharing', {
         driveId,
         shareLink,
         files: fileEntries.length,
         totalBytes
       })
-
+      
       this.emit('drive-created', { driveId, shareLink, metadata })
-
-      return { driveId, shareLink, key, entry: metadata }
+      
+      return { driveId, shareLink, key }
       
     } catch (error) {
       // Cleanup on failure
@@ -409,7 +394,6 @@ class HyperdriveManager extends EventEmitter {
 
   /**
    * Stop sharing a drive
-   *
    * @param {string} driveId - Drive ID to stop
    * @param {Object} options
    * @param {boolean} options.delete - Whether to completely remove drive (default: false)
@@ -429,7 +413,12 @@ class HyperdriveManager extends EventEmitter {
     }
     
     console.log('[HyperdriveManager] Stopping drive', { driveId, delete: options.delete })
-
+    
+    // Clear expiration timer
+    if (session.expirationTimer) {
+      clearTimeout(session.expirationTimer)
+    }
+    
     // Stop progress tracking and remove this drive's tracker listeners so they
     // don't accumulate on the singleton tracker across restarts.
     tracker.stopTracking(driveId)
@@ -503,7 +492,6 @@ class HyperdriveManager extends EventEmitter {
 
   /**
    * Open a drive for downloading (receiving files)
-   * 
    * @param {string} shareLink - peardrop:// link
    * @returns {Promise<{driveId: string, files: Array, download: Function}>}
    */
@@ -513,28 +501,26 @@ class HyperdriveManager extends EventEmitter {
     
     const key = this._parseShareLink(shareLink)
     if (!key) {
-      throw new Error('Invalid share link')
+      throw new EngineError({
+        category: 'receive.invalid-link',
+        cause: 'invalid-link',
+        message: 'Invalid share link',
+      })
     }
     
     const driveId = `recv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const drivePath = path.join(this.drivesDir, driveId)
-    
-    // Immediately persist to drives-state.json (before any network activity)
-    await this.addDriveEntry({
-      driveId: driveId,
-      key: key,
-      discoveryKey: null, // Will be set after drive.ready()
-      state: 'seeking',
-      shareLink: shareLink,
-      isUpload: false,
-      files: [],
-      totalBytes: 0,
-      storagePath: drivePath,
-      createdAt: Date.now(),
-      name: 'Seeking peers...', // Temporary name until we get real data
-      lastAttempt: Date.now()
-    })
-    
+
+    // Persistence deferred until a peer actually connects (see the post-peer
+    // addDriveEntry below). The pre-peer stub used to live here — but if
+    // the open was cancelled OR the app was killed during the seeking window,
+    // the stub survived in drives-state.json with `files: []` and a matching
+    // key, which then produced a false "Already downloaded" duplicate hit on
+    // the next paste of the same link (Cluster 3 in the 5A investigation).
+    // Not persisting until peer contact means every path through this
+    // function ends with either "manifest has a real entry" or "manifest
+    // has no entry" — no orphan stubs.
+
     console.log('[HyperdriveManager] Opening remote drive', { driveId, key: key.slice(0, 16) + '...' })
     
     // Create isolated Corestore session
@@ -594,6 +580,13 @@ class HyperdriveManager extends EventEmitter {
           await drive.close()
           await store.close()
           await fs.rm(drivePath, { recursive: true, force: true })
+          // Belt-and-braces: if any codepath ever creates an early manifest
+          // stub (pre-Sprint-5A there was one at line ~527), remove it here
+          // so a next paste of the same link doesn't produce a false
+          // "Already downloaded" duplicate hit. Idempotent — removeDriveEntry
+          // is a no-op when the entry is already absent. `deleteStorage:false`
+          // because the fs.rm above already covers the storage folder.
+          await this.removeDriveEntry(driveId, { deleteStorage: false })
         } catch (err) {
           console.log('[HyperdriveManager] Cleanup error (ignored)', err.message)
         }
@@ -610,7 +603,11 @@ class HyperdriveManager extends EventEmitter {
       const checkAbort = setInterval(() => {
         if (pendingConnection.aborted) {
           clearInterval(checkAbort)
-          reject(new Error('Connection cancelled by user'))
+          reject(new EngineError({
+            category: 'receive.cancelled',
+            cause: 'open-cancelled',
+            message: 'Connection cancelled by user',
+          }))
         }
       }, 100)
       pendingConnection.abortCheck = checkAbort
@@ -649,7 +646,8 @@ class HyperdriveManager extends EventEmitter {
     let manifest = null
     let totalBytes = 0
     let shareName = null
-    
+    let truncated = null
+
     if (!peerConnected) {
       console.log('[HyperdriveManager] No peer connected yet - drive remains in seeking state')
       // Don't read any data - keep drive in seeking state
@@ -659,12 +657,18 @@ class HyperdriveManager extends EventEmitter {
         const manifestData = await drive.get(DRIVE_MANIFEST_PATH)
       if (manifestData && manifestData.length <= DRIVE_MANIFEST_MAX_SIZE) {
         manifest = JSON.parse(manifestData.toString())
-        
+
         // Validate manifest
         if (manifest.version === DRIVE_MANIFEST_VERSION && Array.isArray(manifest.files)) {
           shareName = manifest.name
           totalBytes = manifest.totalBytes || 0
-          
+
+          // Surface a truncation hint when the manifest declares more files
+          // than the receive cap allows. The slice below caps at 1000; this
+          // signal lets the UI say "showing 1000 of N" instead of silently
+          // dropping the overflow. Matches mobile's `truncated` field shape.
+          truncated = computeTruncation(manifest.files.length, DRIVE_MANIFEST_MAX_FILES)
+
           // Extract files (with security limits)
           files = manifest.files.slice(0, DRIVE_MANIFEST_MAX_FILES).map(f => {
             // Security: validate path doesn't have traversal
@@ -718,7 +722,12 @@ class HyperdriveManager extends EventEmitter {
     }
     this.activeDrives.set(driveId, session)
     
-    // Update the persisted drive entry with real data now that we have successful connection
+    // First and only persist for this drive — the pre-peer stub write that
+    // used to happen up-front (Cluster 3 in the 5A investigation) has been
+    // removed, so this is where the manifest entry actually comes into
+    // being. Only writes when a peer has actually connected; a
+    // never-connected open ends with no manifest entry, which is what makes
+    // "cancelled or crashed open leaves a stub" impossible.
     if (peerConnected) {
       await this.addDriveEntry({
         driveId: driveId,
@@ -751,73 +760,15 @@ class HyperdriveManager extends EventEmitter {
       totalBytes,
       hasManifest: !!manifest,
       peerConnected,
-      
-      /**
-       * Download all files to a directory
-       * If shareName exists (folder share), creates a subfolder with that name
-       * Preserves full directory structure from the original share
-       */
-      downloadAll: async (destDir) => {
-        await fs.mkdir(destDir, { recursive: true })
-        
-        // Determine the root folder for this download
-        // For folder shares: destDir/shareName/
-        // For single files: destDir/
-        console.log('[HyperdriveManager] downloadAll starting', { 
-          destDir, 
-          shareName, 
-          fileCount: files.length,
-          manifestName: manifest?.name 
-        })
-        
-        const isFolderShare = files.length > 1 || (shareName && !shareName.includes('.'))
-        const downloadRoot = isFolderShare && shareName 
-          ? path.join(destDir, shareName)
-          : destDir
-        
-        console.log('[HyperdriveManager] Download root calculated', { 
-          isFolderShare, 
-          downloadRoot 
-        })
-        
-        await fs.mkdir(downloadRoot, { recursive: true })
-        
-        for (const file of files) {
-          const data = await drive.get(file.name)
-          if (data) {
-            // file.name is like "/lib/foo.js" - preserve the structure
-            // Remove leading slash and join with download root
-            const relativePath = file.name.replace(/^\/+/, '')
-            const destPath = path.join(downloadRoot, relativePath)
-            
-            // Ensure parent directories exist
-            const parentDir = path.dirname(destPath)
-            await fs.mkdir(parentDir, { recursive: true })
-            
-            await fs.writeFile(destPath, data)
-            console.log('[HyperdriveManager] Downloaded file', { name: file.name, destPath })
-          }
-        }
-        
-        console.log('[HyperdriveManager] Download complete', { 
-          downloadRoot, 
-          fileCount: files.length,
-          isFolderShare 
-        })
-        return downloadRoot
-      },
-      
-      /**
-       * Download a specific file
-       */
-      downloadFile: async (fileName, destPath) => {
-        const data = await drive.get(fileName)
-        if (!data) throw new Error(`File not found: ${fileName}`)
-        
-        await fs.writeFile(destPath, data)
-        return destPath
-      },
-      
+      truncated,
+
+      // Expose the drive so external callers (e.g. the CLI's `peardrop
+      // download`) can pass it directly to lib/downloader.js. The GUI IPC
+      // handler reaches through `hyperdriveManager.activeDrives.get(driveId)`
+      // to get the same reference; this field is the equivalent surface for
+      // callers that hold the openDrive return value.
+      drive,
+
       /**
        * Close this receiving session and cleanup
        */
@@ -838,23 +789,8 @@ class HyperdriveManager extends EventEmitter {
   async addDriveEntry(driveData) {
     // NOTE: Removed init() call to prevent infinite loops
     // addDriveEntry() is an internal method that should only be called after init()
-    //
-    // ONE WRITER PER ENTRY TYPE: share entries are written ONLY by
-    // createDrive(); this method's sole remaining caller is openDrive()
-    // creating recv_ (download) entries.
-
+    
     const driveId = driveData.id || driveData.driveId
-
-    // TRIPWIRE (2026-07-03): never silently replace an existing entry. The
-    // share double-write bug lived here for months because this method
-    // happily overwrote createDrive's richer entry with a different schema.
-    if (this.manifest.drives[driveId]) {
-      console.warn('[HyperdriveManager] addDriveEntry called for EXISTING entry — merging instead of overwriting. This is probably a bug in the caller.', { driveId })
-      const merged = { ...this.manifest.drives[driveId], ...driveData, driveId }
-      this.manifest.drives[driveId] = merged
-      await this._saveManifest()
-      return merged
-    }
     
     // Use provided name - caller is responsible for setting appropriate name
     const shareLink = driveData.shareLink || `peardrop://${driveData.key}`
@@ -1276,6 +1212,7 @@ class HyperdriveManager extends EventEmitter {
         files: session.metadata.files,
         totalBytes: session.metadata.totalBytes,
         createdAt: session.metadata.createdAt,
+        expiresAt: session.metadata.expiresAt,
         isReceiving: session.isReceiving || false
       })
     }
@@ -1674,7 +1611,11 @@ class HyperdriveManager extends EventEmitter {
       const checkAbort = setInterval(() => {
         if (pendingConnection.aborted) {
           clearInterval(checkAbort)
-          reject(new Error('Connection cancelled by user'))
+          reject(new EngineError({
+            category: 'receive.cancelled',
+            cause: 'open-cancelled',
+            message: 'Connection cancelled by user',
+          }))
         }
       }, 100)
       pendingConnection.abortCheck = checkAbort
@@ -1716,7 +1657,8 @@ class HyperdriveManager extends EventEmitter {
     let files = []
     let shareName = 'Remote Share'
     let totalBytes = 0
-    
+    let truncated = null
+
     try {
       const manifestBuffer = await drive.get(DRIVE_MANIFEST_PATH)
       // Cap the size before parsing — the manifest comes from a remote peer and
@@ -1724,11 +1666,17 @@ class HyperdriveManager extends EventEmitter {
       // already enforces the same limit).
       if (manifestBuffer && manifestBuffer.length > 0 && manifestBuffer.length <= DRIVE_MANIFEST_MAX_SIZE) {
         manifest = JSON.parse(manifestBuffer.toString())
+        const declaredCount = Array.isArray(manifest.files) ? manifest.files.length : 0
+        truncated = computeTruncation(declaredCount, DRIVE_MANIFEST_MAX_FILES)
         files = (manifest.files || []).slice(0, DRIVE_MANIFEST_MAX_FILES)
         shareName = manifest.name || files[0]?.name || 'Remote Share'
         totalBytes = manifest.totalBytes || files.reduce((sum, f) => sum + (f.size || 0), 0)
       } else if (manifestBuffer && manifestBuffer.length > DRIVE_MANIFEST_MAX_SIZE) {
-        throw new Error('manifest exceeds size limit')
+        throw new EngineError({
+          category: 'receive.manifest-oversized',
+          cause: 'manifest-oversized',
+          message: 'manifest exceeds size limit',
+        })
       }
     } catch (err) {
       console.log('[HyperdriveManager] No manifest found, scanning drive...', { driveId })
@@ -1812,7 +1760,8 @@ class HyperdriveManager extends EventEmitter {
       shareName,
       totalBytes,
       hasManifest: !!manifest,
-      peerConnected
+      peerConnected,
+      truncated
     }
   }
 }

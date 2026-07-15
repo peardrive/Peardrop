@@ -2,49 +2,41 @@
  * MODULE: drive-actions.js
  * PURPOSE: Maps DriveItem UI actions to system calls
  * VERSION: 1.0.0
- * 
  * ARCHITECTURE:
  *   DriveItem (UI) → emits action → DriveActions → calls API → main.js IPC → HyperdriveManager/shell
- *   
  *   This module bridges UI events and system operations without either knowing about the other.
  *   DriveItem stays pure (no Electron deps), HyperdriveManager stays data-focused.
- * 
  * EXPORTS:
- *   - handleAction(api, action, data) - Main entry point for all actions
- *   - DriveActions class - For apps that want instance-based usage
- * 
+ * handleAction(api, action, data) - Main entry point for all actions
+ * DriveActions class - For apps that want instance-based usage
  * ACTIONS HANDLED:
- *   - open: Open file in default app
- *   - show-files: Show file in Finder/Explorer
- *   - remove: Remove drive from manager
- *   - pause: Pause drive (stop network, keep data)
- *   - resume: Resume paused drive
- *   - more-info: Get drive metadata (returns data, UI handles display)
- *   - tip: Get tip address (returns address, UI handles Lightning flow)
- * 
+ * open: Open file in default app
+ * show-files: Show file in Finder/Explorer
+ * remove: Remove drive from manager
+ * pause: Pause drive (stop network, keep data)
+ * resume: Resume paused drive
+ * more-info: Get drive metadata (returns data, UI handles display)
+ * tip: Get tip address (returns address, UI handles Lightning flow)
  * API INTERFACE REQUIRED:
  *   The `api` parameter must implement:
- *   - driveGet(id) → { success, drive }
- *   - drivesRemove({ id, deleteFiles }) → { success }
- *   - drivesPause(id) → { success }
- *   - drivesResume(id) → { success }
- *   - openFile(filePath) → { success }
- *   - showFileInFolder(filePath) → { success }
- *   - openDownloads() → { success }
- * 
+ * driveGet(id) → { success, drive }
+ * drivesRemove({ id, deleteFiles }) → { success }
+ * drivesPause(id) → { success }
+ * drivesResume(id) → { success }
+ * openFile(filePath) → { success }
+ * showFileInFolder(filePath) → { success }
+ * openDownloads() → { success }
  * USAGE:
  *   // Functional style
  *   import { handleAction } from './drive-actions.js';
  *   item.on('action', (e) => handleAction(window.electronAPI, e.action, e.data));
- * 
  *   // Class style
  *   import { DriveActions } from './drive-actions.js';
  *   const actions = new DriveActions(window.electronAPI);
  *   item.on('action', (e) => actions.handle(e.action, e.data));
- * 
  * EXTERNAL CALLS:
- *   - api.driveGet, api.drivesRemove, api.drivesPause, api.drivesResume
- *   - api.openFile, api.showFileInFolder, api.openDownloads
+ * api.driveGet, api.drivesRemove, api.drivesPause, api.drivesResume
+ * api.openFile, api.showFileInFolder, api.openDownloads
  */
 
 (function(global, factory) {

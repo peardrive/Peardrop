@@ -2,43 +2,36 @@
  * MODULE: renderer.js (PearDrop v2)
  * PURPOSE: PearDrop UI - Integrated ScrollList + DriveItem with PearCore backend
  * VERSION: 0.19.1
- * 
  * ARCHITECTURE:
- *   - Uses ScrollList v2 slot-based system
- *   - DriveItem components mount into slots
- *   - DriveActions module handles menu action → API calls
- *   - Same PearCore backend (IPC unchanged)
- *   - Modular, standalone components
- * 
+ * Uses ScrollList v2 slot-based system
+ * DriveItem components mount into slots
+ * DriveActions module handles menu action → API calls
+ * Same PearCore backend (IPC unchanged)
+ * Modular, standalone components
  * EXPORTS: None (DOM script)
- * 
  * LAYOUT:
- *   - Header: Profile icon (top-left)
- *   - Drop zone: Compact file drop area
- *   - List: ScrollList with DriveItem slots
- *   - Input: Paste peardrop:// links
- *   - Actions: Share + Download buttons
- * 
+ * Header: Profile icon (top-left)
+ * Drop zone: Compact file drop area
+ * List: ScrollList with DriveItem slots
+ * Input: Paste peardrop:// links
+ * Actions: Share + Download buttons
  * EXTERNAL MODULES:
- *   - ScrollList (lib/scroll-list/scroll-list.js)
- *   - DriveItem (lib/drive-item/drive-item.js)
- *   - DriveActions (lib/drive-actions.js)
- *   - QrScanner (lib/qr-scanner/qr-scanner.js) — window.openQrScanner
- * 
+ * ScrollList (lib/scroll-list/scroll-list.js)
+ * DriveItem (lib/drive-item/drive-item.js)
+ * DriveActions (lib/drive-actions.js)
+ * QrScanner (lib/qr-scanner/qr-scanner.js) — window.openQrScanner
  * IPC CALLS (via window.electronAPI):
- *   - hyperdriveShare, hyperdriveOpen, hyperdriveDownload
- *   - drivesList, drivesPause, drivesResume, drivesRemove, driveGet
- *   - openDownloads, openFile, showFileInFolder, getFilesStats
- *   - getDebug, setDebug
- * 
+ * hyperdriveShare, hyperdriveOpen, hyperdriveDownload
+ * drivesList, drivesPause, drivesResume, drivesRemove, driveGet
+ * openDownloads, openFile, showFileInFolder, getFilesStats
+ * getDebug, setDebug
  * IPC LISTENERS:
- *   - onPeerConnected, onPeerDisconnected
- *   - onUploadProgress, onFilesDownloaded, onDrivesUpdated
- * 
+ * onPeerConnected, onPeerDisconnected
+ * onUploadProgress, onFilesDownloaded, onDrivesUpdated
  * DEBUG:
  *   In DevTools console:
- *   - peardrop.debug()      — Check if debug logging is enabled
- *   - peardrop.setDebug(true/false) — Toggle debug logging
+ * peardrop.debug() — Check if debug logging is enabled
+ * peardrop.setDebug(true/false) — Toggle debug logging
  */
 
 // ============================================================================
@@ -89,6 +82,15 @@ let scrollList = null;          // ScrollList instance
 // Upload aggregation: driveId -> { peers: Set<peerId>, totalSpeed, lastUpdate, hadTransfer }
 // The Set<peerId> is the SINGLE source of truth for peer count; drive.peers mirrors it.
 let uploadTracking = new Map();
+
+// Boot-time snapshot of hydrate failures, keyed by driveId: { error, at }.
+// Populated from the `drives-updated action:'loaded'` payload; updated at
+// runtime by `drive-resume-failed` events. When a drive's id appears here
+// the display-status mapping renders it as `inactive` instead of its
+// manifest-implied `sharing`/`connecting`, so the UI tells the truth about
+// drives that are tracked but not actually running. Manifest state stays
+// untouched (see hyperdrive-manager.js:1420-1424 for the no-persist policy).
+let resumeErrors = {};
 
 // Sort state
 let sortField = 'recent';       // recent | status | size | custom
@@ -188,6 +190,10 @@ function init() {
                     if (event.action === 'pause') {
                         updateDriveInList({ id: event.data.id, status: 'paused' });
                     } else if (event.action === 'resume') {
+                        // Clear any recorded hydrate-failure — the manual
+                        // Resume just succeeded, so the drive is no longer
+                        // in the "tracked but not running" state.
+                        delete resumeErrors[event.data.id];
                         const status = event.data.type === 'share' ? 'sharing' : 'downloading';
                         updateDriveInList({ id: event.data.id, status });
                     }
@@ -519,13 +525,44 @@ async function startDownload() {
     
     linkInput.value = '';
     
-    // 1. Check for duplicate (fast local check)
+    // 1. Check for duplicate (fast local check). The three-way decision —
+    // proceed / block / confirm-then-force-redownload — lives in the pure
+    // `dup-check-action.js` module so it can be unit-tested without Electron.
     const dupCheck = await window.electronAPI.hyperdriveCheckDuplicate({ shareLink: link });
-    
-    if (dupCheck.isDuplicate) {
-        highlightExistingDrive(dupCheck.driveId);
+    const decision = window.PearDupCheckAction.decideDupCheckAction(dupCheck);
+
+    if (decision.action === 'block') {
+        highlightExistingDrive(decision.driveId);
         showAlreadyDownloadedMessage('Already downloaded');
         return;
+    }
+
+    if (decision.action === 'confirm-redownload') {
+        // Local files are gone — either the user deleted them, or an earlier
+        // open produced only a stub (pre-Sprint-5A this was the common case).
+        // Ask before starting a fresh download rather than silently
+        // proceeding, then use forceOpen so the open-side dedup doesn't
+        // short-circuit us right back.
+        const confirmed = await new Promise((resolve) => {
+            showConfirm({
+                title: 'Re-download?',
+                message: "This share's files are no longer on your device — re-download?",
+                buttons: [
+                    { label: 'Cancel', class: 'secondary', action: () => resolve(false) },
+                    { label: 'Re-download', class: 'primary', action: () => resolve(true) }
+                ]
+            });
+        });
+        if (!confirmed) return;
+        // Remove the stale entry so the fresh receive doesn't collide with it
+        // in the list. The backend still holds the manifest entry — the
+        // subsequent hyperdriveOpen({forceOpen: true}) will overwrite it
+        // when a real peer connects, and the drives-updated `removed` event
+        // for the old entry keeps the UI honest in the meantime.
+        if (decision.driveId) {
+            try { await window.electronAPI.drivesRemove?.({ id: decision.driveId, deleteFiles: false }); } catch {}
+        }
+        // Fall through to the normal open-and-download flow.
     }
     
     // 2. Not a duplicate - add to list immediately (animate — fresh download)
@@ -568,23 +605,44 @@ async function startDownload() {
         return;
     }
     
-    // Have peer or data - proceed with download
+    // Have peer or data - remove the connecting placeholder, then gate the
+    // download behind the receive-selection modal ().
     removeDriveFromList(tempId);
-    
+
+    // show selection modal before firing handleDownload.
+    // Pre-4E-ui, handleDownload fired immediately here (was at renderer.js:587).
+    // Now: user picks a subset (or takes the default "all"), and only on
+    // confirm does the drive get added to the list + the download fire.
+    // Cancel = no drive added, no download, link discarded (one-shot receive).
+    const files = (openResult.files || []).map(f => ({ name: f.name, size: f.size }));
+    const proceed = await showReceiveSelectionModal({
+        shareName: openResult.shareName,
+        files,
+        truncated: openResult.truncated || null,
+    });
+
+    if (!proceed) {
+        // User cancelled — nothing to clean up; the tempId was already
+        // removed above. The connection stays open in the manager, but
+        // no visible drive entry and no download fired.
+        console.log('[PearDrop] Receive cancelled by user');
+        return;
+    }
+
     addDriveToList({
         id: driveId,
         title: openResult.shareName || 'Download',
         size: openResult.totalBytes || 0,
-        fileCount: openResult.files?.length || 1,
-        files: (openResult.files || []).map(f => ({ name: f.name, size: f.size })),
+        fileCount: files.length || 1,
+        files,
         status: 'downloading',
         progress: 0,
         peers: hasPeer ? 1 : 0,
         type: 'download',
         shareLink: link
     });
-    
-    handleDownload(driveId, link);
+
+    handleDownload(driveId, link, proceed.fileNames);
 }
 
 // Highlight an existing drive in the list and scroll to it
@@ -636,10 +694,19 @@ function showAlreadyDownloadedMessage(message) {
 }
 
 // Background download handler
-async function handleDownload(driveId, link) {
+// optional `fileNames` — the subset the user picked in the
+// receive-selection modal. When omitted / null / empty the engine's dormant
+// path runs (download every non-manifest entry), matching pre-4E-ui behavior.
+// This is why `showReceiveSelectionModal` returns `{ fileNames: null }` for
+// the "download all" case: passing null keeps `wantedSet` null in downloader.js
+// and preserves the download-all fast path.
+async function handleDownload(driveId, link, fileNames = null) {
     try {
-        const downloadResult = await window.electronAPI.hyperdriveDownload({ driveId });
-        
+        const payload = { driveId };
+        if (Array.isArray(fileNames) && fileNames.length) payload.fileNames = fileNames;
+
+        const downloadResult = await window.electronAPI.hyperdriveDownload(payload);
+
         if (downloadResult.success) {
             updateDriveInList({ id: driveId, status: 'complete', progress: 1 });
         } else {
@@ -649,6 +716,159 @@ async function handleDownload(driveId, link) {
         console.error('Download error:', err);
         updateDriveInList({ id: driveId, status: 'error' });
     }
+}
+
+// ============================================================================
+// RECEIVE-SELECTION MODAL ()
+// ============================================================================
+// Standalone pre-download UI. Shown after hyperdriveOpen resolves, before any
+// download fires. Returns a Promise that resolves with:
+// { fileNames: null } → user confirmed the "download all" default (or
+//                              chose everything). Caller passes NO `fileNames`
+//                              to hyperdriveDownload, keeping the engine's
+//                              wantedSet null (dormancy).
+// { fileNames: [...] } → user chose a subset. Caller passes the array.
+// false → user cancelled. Do not download.
+// One-shot: no session cache, no cross-download state. Re-opening the same
+// link is a fresh receive (documented divergence from mobile).
+function showReceiveSelectionModal({ shareName, files, truncated }) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('receiveSelectionModal');
+        const titleEl = document.getElementById('receiveSelectionTitle');
+        const listEl = document.getElementById('receiveSelectionList');
+        const countEl = document.getElementById('receiveSelectionCount');
+        const toggleBtn = document.getElementById('receiveSelectionToggleAll');
+        const toggleLabel = document.getElementById('receiveSelectionToggleLabel');
+        const truncEl = document.getElementById('receiveSelectionTruncated');
+        const cancelBtn = document.getElementById('receiveSelectionCancelBtn');
+        const confirmBtn = document.getElementById('receiveSelectionConfirmBtn');
+
+        if (!modal || !listEl || !confirmBtn) {
+            console.warn('[PearDrop] Selection modal DOM missing — falling back to download-all');
+            resolve({ fileNames: null });
+            return;
+        }
+
+        const logic = window.PearSelectionLogic;
+        const utils = window.PearUtils || { formatBytes: (n) => `${n} B`, escapeHtml: (s) => s, getFileIcon: () => '📄' };
+        const list = Array.isArray(files) ? files : [];
+
+        // Default: everything selected. Preserves the "just download all" muscle
+        // memory — confirming without touching anything is identical to
+        // pre-4E-ui behavior.
+        let selected = new Set(list.map((f) => f.name));
+
+        titleEl.textContent = shareName ? `Download "${shareName}"` : 'Download share';
+
+        // Truncation hint (reuse the signal if the manifest was
+        // over-cap). Just display the honest sender-declared/receiver-shown
+        // count; no new plumbing.
+        if (truncated && truncated.available && truncated.shown) {
+            truncEl.textContent = `Note: manifest listed ${truncated.shown} of ${truncated.available} files.`;
+            truncEl.style.display = '';
+        } else {
+            truncEl.style.display = 'none';
+        }
+
+        // Render rows.
+        listEl.innerHTML = '';
+        if (list.length === 0) {
+            // No files metadata available (rare — happens if the peer's
+            // manifest was empty at open time). Fall through to download-all.
+            listEl.innerHTML = '<div style="padding: 12px; color: rgba(255,255,255,0.5); font-size: 12px;">File list not available. Confirming will download everything the peer shares.</div>';
+        } else {
+            const frag = document.createDocumentFragment();
+            for (const f of list) {
+                const row = document.createElement('label');
+                row.className = 'receive-selection-row';
+                const safeName = utils.escapeHtml(f.name);
+                const sizeStr = utils.formatBytes(Number(f.size) || 0);
+                const icon = utils.getFileIcon(f.name);
+                row.innerHTML = `
+                    <input type="checkbox" data-name="${safeName}" checked>
+                    <span class="receive-selection-icon">${icon}</span>
+                    <span class="receive-selection-name" title="${safeName}">${safeName}</span>
+                    <span class="receive-selection-size">${sizeStr}</span>
+                `;
+                frag.appendChild(row);
+            }
+            listEl.appendChild(frag);
+        }
+
+        function render() {
+            const stats = logic.computeStats(list, selected);
+            countEl.textContent = list.length === 0
+                ? 'File list not available'
+                : `${stats.selectedCount} of ${stats.totalCount} files · ${utils.formatBytes(stats.selectedBytes)}`;
+            toggleLabel.textContent = stats.allSelected ? 'Select none' : 'Select all';
+            confirmBtn.textContent = logic.primaryLabel(list, selected);
+            const disabled = list.length > 0 && logic.isConfirmDisabled(list, selected);
+            confirmBtn.disabled = disabled;
+        }
+
+        function onCheckboxChange(e) {
+            const cb = e.target;
+            if (!(cb instanceof HTMLInputElement) || cb.type !== 'checkbox') return;
+            const name = cb.dataset.name;
+            if (!name) return;
+            selected = logic.toggleOne(selected, name, cb.checked);
+            render();
+        }
+
+        function onToggleAll() {
+            const stats = logic.computeStats(list, selected);
+            const nextChecked = !stats.allSelected;
+            selected = logic.toggleAll(list, selected, nextChecked);
+            for (const cb of listEl.querySelectorAll('input[type="checkbox"]')) {
+                cb.checked = nextChecked;
+            }
+            render();
+        }
+
+        function cleanup() {
+            modal.classList.remove('active');
+            listEl.removeEventListener('change', onCheckboxChange);
+            toggleBtn.removeEventListener('click', onToggleAll);
+            cancelBtn.removeEventListener('click', onCancel);
+            confirmBtn.removeEventListener('click', onConfirm);
+            modal.removeEventListener('click', onBackdrop);
+            document.removeEventListener('keydown', onKeydown);
+        }
+
+        function onCancel() {
+            cleanup();
+            resolve(false);
+        }
+
+        function onConfirm() {
+            // Guard: if the button is disabled we should never fire — but the
+            // click could arrive from a keyboard shortcut on some browsers.
+            if (list.length > 0 && logic.isConfirmDisabled(list, selected)) return;
+            const fileNames = logic.shouldPassFileNames(list, selected)
+                ? logic.toFileNames(list, selected)
+                : null;
+            cleanup();
+            resolve({ fileNames });
+        }
+
+        function onBackdrop(e) {
+            if (e.target === modal) onCancel();
+        }
+
+        function onKeydown(e) {
+            if (e.key === 'Escape') onCancel();
+        }
+
+        listEl.addEventListener('change', onCheckboxChange);
+        toggleBtn.addEventListener('click', onToggleAll);
+        cancelBtn.addEventListener('click', onCancel);
+        confirmBtn.addEventListener('click', onConfirm);
+        modal.addEventListener('click', onBackdrop);
+        document.addEventListener('keydown', onKeydown);
+
+        render();
+        modal.classList.add('active');
+    });
 }
 
 // ============================================================================
@@ -666,7 +886,6 @@ function bindModals() {
 }
 
 // One-time "share history was reset" notice.
-//
 // Gating logic:
 //   1. If user already dismissed (SEEN_FLAG) → skip.
 //   2. If lastSeenVersion is tracked → show only when the user has crossed
@@ -674,10 +893,8 @@ function bindModals() {
 //   3. If lastSeenVersion is missing (first launch on this build) → use
 //      legacy-data presence as a tiebreaker: fresh install → no notice;
 //      old data on disk → notice.
-//
 // FIX_VERSION = the first build that contained the persistence fix.
 // Bump it forward only if a future fix produces a new one-time notice.
-//
 // Safe to retire by removing this function, its call site, the modal
 // HTML/CSS, the preload bridges, and the matching IPC handlers.
 async function showResetNoticeIfNeeded() {
@@ -1045,16 +1262,13 @@ async function loadDrives() {
     }
 }
 
-// Backend DriveState -> DriveItem display status.
+// Backend DriveState -> DriveItem display status. The mapping — including the
+// `resumeErrors` merge that renders a resume-failed drive as `inactive`
+// instead of its misleading manifest-implied `sharing` — lives in
+// `lib/status-mapping.js` so it can be unit-tested without Electron.
 // (Fixed 2026-07-03: backend sends `state`, but this read `drive.status`,
 // so paused/errored drives silently rendered as healthy "Sharing".)
-const STATE_TO_STATUS = {
-    active: 'sharing',
-    paused: 'paused',
-    errored: 'error',
-    seeking: 'connecting',
-    creating: 'connecting'
-};
+const STATE_TO_STATUS = window.PearStatusMapping.STATE_TO_STATUS;
 
 function normalizeDrive(drive) {
     return {
@@ -1063,7 +1277,7 @@ function normalizeDrive(drive) {
         size: drive.totalBytes || drive.size || 0,
         fileCount: drive.fileCount || drive.files?.length || 1,
         files: drive.files || [],
-        status: drive.status || STATE_TO_STATUS[drive.state] || 'sharing',
+        status: window.PearStatusMapping.deriveStatus(drive, resumeErrors),
         progress: drive.progress,
         speed: drive.speed,
         peers: drive.peers || 0,
@@ -1224,6 +1438,22 @@ function bindIPC() {
         }
     });
     
+    // Runtime resume-failure signal. Boot-time failures arrive in the
+    // drives-updated action:'loaded' payload; this channel handles anything
+    // that fails to resume AFTER init (currently rare in practice, but
+    // future-proofs when e.g. a manual resume attempt errors). Merges the
+    // new entry into the module-level resumeErrors map, then re-normalizes
+    // the affected drive so the display flips to `inactive`.
+    window.electronAPI.onDriveResumeFailed?.((event, data) => {
+        if (!data || !data.driveId) return;
+        console.log('[PearDrop] drive-resume-failed:', data.driveId, data.error);
+        resumeErrors[data.driveId] = { error: data.error, at: Date.now() };
+        const existing = drives.find(d => d.id === data.driveId);
+        if (existing) {
+            updateDriveInList({ id: data.driveId, status: 'inactive' });
+        }
+    });
+
     // Resumed drive ready to download - trigger download for interrupted transfers
     window.electronAPI.onDriveReadyToDownload?.((event, data) => {
         const { driveId, shareLink, shareName } = data;
@@ -1245,7 +1475,14 @@ function bindIPC() {
     window.electronAPI.onDrivesUpdated?.((event, data) => {
         if (data.action === 'loaded') {
             // Complete drives list loaded (e.g., at startup)
-            console.log('[PearDrop] Drives loaded, refreshing list:', data.drives?.length || 0);
+            console.log('[PearDrop] Drives loaded, refreshing list:', data.drives?.length || 0,
+                data.resumeErrors && Object.keys(data.resumeErrors).length
+                    ? `(${Object.keys(data.resumeErrors).length} resume failure(s))`
+                    : '');
+            // Adopt the boot snapshot of hydrate failures BEFORE normalizing
+            // any drive — normalizeDrive reads the module-level `resumeErrors`
+            // to decide whether a drive should render as `inactive`.
+            resumeErrors = data.resumeErrors || {};
             if (data.drives) {
                 for (const drive of data.drives) {
                     const normalized = normalizeDrive(drive);
@@ -1585,7 +1822,7 @@ async function loadGroupThumbnail(driveId) {
     canvas.height = target;
     const ctx = canvas.getContext('2d');
 
-    // ---- Stack geometry ----
+    // Stack geometry ----
     // The card stack centers in the canvas and "fans" from top-left (back)
     // to bottom-right (front). Cards are square with rounded corners.
     const cardSize = 54;
@@ -1640,7 +1877,7 @@ async function loadGroupThumbnail(driveId) {
         ctx.restore();
     }
 
-    // ---- Count badge: rounded pill, bottom-right ----
+    // Count badge: rounded pill, bottom-right ----
     const count = drive.files.length;
     const badgeText = String(count);
     ctx.font = 'bold 18px -apple-system, "SF Pro Display", "Segoe UI", sans-serif';
@@ -1937,21 +2174,26 @@ async function pauseAllTransfers() {
 }
 
 async function resumeAllTransfers() {
-    // Include errored drives — resume retries them (errors are usually
-    // transient, e.g. a boot-time fd lock from a second instance)
-    const pausedDrives = drives.filter(d => d.status === 'paused' || d.status === 'error');
+    // Include errored AND inactive drives — resume retries them (errors are
+    // usually transient, e.g. a boot-time fd lock from a second instance;
+    // inactive is a resume-failed drive whose manifest state was left alone
+    // by design and is waiting on a user-initiated retry).
+    const pausedDrives = drives.filter(d => d.status === 'paused' || d.status === 'error' || d.status === 'inactive');
 
     if (pausedDrives.length === 0) {
         showToast('No paused transfers to resume', 'info');
         return;
     }
-    
+
     let resumed = 0;
     let failed = 0;
     for (const drive of pausedDrives) {
         try {
             const result = await window.electronAPI.drivesResume?.(drive.id);
             if (result?.success) {
+                // Clear any recorded hydrate-failure — the retry just
+                // succeeded, so the drive is back to healthy.
+                delete resumeErrors[drive.id];
                 const status = drive.type === 'share' ? 'sharing' : 'downloading';
                 updateDriveInList({ id: drive.id, status });
                 resumed++;
@@ -1975,8 +2217,8 @@ async function resumeAllTransfers() {
 
 async function clearCompletedTransfers() {
     // Find all clearable items:
-    // - Downloads that are complete, inactive, or not actively downloading
-    // - Shares that are complete, inactive, paused, or not actively connected
+    // Downloads that are complete, inactive, or not actively downloading
+    // Shares that are complete, inactive, paused, or not actively connected
     const clearable = drives.filter(d => {
         // Active downloads in progress - keep
         if (d.type === 'download' && d.status === 'downloading' && d.progress < 1) {
@@ -2258,9 +2500,8 @@ function log(...args) {
 
 /**
  * Expose debug controls on window.peardrop for DevTools console access
- * 
  * Usage in DevTools:
- *   peardrop.debug()        — Check current state
+ * peardrop.debug() — Check current state
  *   peardrop.setDebug(true) — Enable logging
  *   peardrop.setDebug(false) — Disable logging
  */

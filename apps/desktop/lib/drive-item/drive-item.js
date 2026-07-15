@@ -1,30 +1,24 @@
 /**
  * DriveItem - Standalone drive display component
- *
  * @module DriveItem
  * @version 1.0.0
- *
  * EXPORTS:
- *   - DriveItem (class) - Main component class
- *
+ * DriveItem (class) - Main component class
  * DEPENDENCIES:
- *   - None (zero external dependencies)
- *   - Optional: ProgressBar module for download progress
- *
+ * None (zero external dependencies)
+ * Optional: ProgressBar module for download progress
  * EVENTS EMITTED (subscribe via item.on(event, handler)):
- *   - 'click'     - Single-file item clicked. Payload: drive data.
- *   - 'action'    - Menu action chosen. Payload: { action, data }.
- *   - 'expand'    - Expandable item toggled. Payload: { expanded, data }.
- *   - 'fileClick' - Child file row in the expanded list clicked.
+ * 'click' - Single-file item clicked. Payload: drive data.
+ * 'action' - Menu action chosen. Payload: { action, data }.
+ * 'expand' - Expandable item toggled. Payload: { expanded, data }.
+ * 'fileClick' - Child file row in the expanded list clicked.
  *                   Payload: { file, index, data }.
- *
  * USAGE:
  *   const item = new DriveItem(container, {
  *     data: { title: 'My Drive', size: 1024000, ... },
  *     show: ['title', 'size', 'status', 'progress'],
  *     theme: 'dark'
  *   });
- *
  *   item.update({ progress: 0.75, speed: 125000 });
  *   item.setVisibility(['title', 'progress', 'peers']);
  *   item.setTheme('light');
@@ -63,12 +57,10 @@
   ];
 
   // Preset visibility configurations
-  // 
   // UPLOAD vs DOWNLOAD display rules:
-  // - DOWNLOADS: Show progress bar, speed, peers
-  // - UPLOADS: Show peers, upload bandwidth — NO progress bar
+  // DOWNLOADS: Show progress bar, speed, peers
+  // UPLOADS: Show peers, upload bandwidth — NO progress bar
   //   (uploader doesn't track what downloader needs, just serves requests)
-  //
   const PRESETS = {
     all: FIELDS.filter(f => f !== 'path' && f !== 'statusIcon'), // path hidden by default
     minimal: ['title', 'status'],
@@ -131,13 +123,24 @@
       icon: '⚠',
       animate: null,
       dimItem: true
+    },
+    // Drive is not currently active (e.g. failed to resume at boot). Neutral
+    // grey + dimmed to say "nothing is happening" without alarming; not
+    // "error" because the failure is usually transient and the manifest
+    // state is untouched. Retry is user-initiated via the Resume menu item.
+    inactive: {
+      label: 'Inactive',
+      color: 'var(--di-status-inactive, #94a3b8)',
+      icon: '◯',
+      animate: null,
+      dimItem: true
     }
   };
 
   // Default menu items (only pause/resume get icons)
   const DEFAULT_MENU_ITEMS = [
     { id: 'pause', label: 'Pause', icon: '⏸', showWhen: (data) => data.status === 'downloading' || data.status === 'sharing' },
-    { id: 'resume', label: 'Resume', icon: '▶', showWhen: (data) => data.status === 'paused' || data.status === 'error' },
+    { id: 'resume', label: 'Resume', icon: '▶', showWhen: (data) => data.status === 'paused' || data.status === 'error' || data.status === 'inactive' },
     { id: 'open', label: 'Open' },
     { id: 'show-files', label: 'Show Files' },
     { id: 'more-info', label: 'More Info' },

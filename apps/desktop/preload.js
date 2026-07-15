@@ -2,46 +2,40 @@
  * MODULE: preload.js
  * PURPOSE: Secure IPC bridge between renderer and main process
  * VERSION: 0.19.1
- * 
  * EXPORTS (via window.electronAPI):
  *   INVOKE (renderer -> main):
  *     Hyperdrive:
- *       - hyperdriveShare(data) - Create share from files
- *       - hyperdriveCheckDuplicate(data) - Fast local duplicate check
- *       - hyperdriveOpen(data) - Open remote drive
- *       - hyperdriveDownload(data) - Download from opened drive
- *
+ * hyperdriveShare(data) - Create share from files
+ * hyperdriveCheckDuplicate(data) - Fast local duplicate check
+ * hyperdriveOpen(data) - Open remote drive
+ * hyperdriveDownload(data) - Download from opened drive
  *     Drive list (HyperdriveManager + drives-state.json):
- *       - drivesList() - Get all drives
- *       - drivesPause(id | {id}) - Pause seeding (keep data)
- *       - drivesResume(id | {id}) - Resume seeding (rejoins swarm)
- *       - drivesRemove(id | {id, deleteFiles}) - Remove drive completely
- *
+ * drivesList() - Get all drives
+ * drivesPause(id | {id}) - Pause seeding (keep data)
+ * drivesResume(id | {id}) - Resume seeding (rejoins swarm)
+ * drivesRemove(id | {id, deleteFiles}) - Remove drive completely
  *     Utilities:
- *       - openDownloads() - Open downloads folder
- *       - openFile(filePath) - Open file in default app
- *       - showFileInFolder(filePath) - Show file in Finder/Explorer
- *       - driveGet(id) - Get single drive by ID (drive-actions open/show)
- *       - getFilesStats(paths) - Get file/folder stats
- *       - generateQr(text) - Generate QR data URL for a string
- *       - getAppVersion() - Get app version (for reset notice gating)
- *       - checkLegacyDataPresent() - Detect pre-unified state files
- *       - getFileThumbnail(filePath) - Image src or OS icon for a file
- *
+ * openDownloads() - Open downloads folder
+ * openFile(filePath) - Open file in default app
+ * showFileInFolder(filePath) - Show file in Finder/Explorer
+ * driveGet(id) - Get single drive by ID (drive-actions open/show)
+ * getFilesStats(paths) - Get file/folder stats
+ * generateQr(text) - Generate QR data URL for a string
+ * getAppVersion() - Get app version (for reset notice gating)
+ * checkLegacyDataPresent() - Detect pre-unified state files
+ * getFileThumbnail(filePath) - Image src or OS icon for a file
  *     Debug:
- *       - getDebug() - Get current debug state
- *       - setDebug(enabled) - Set debug state (persists to config)
- * 
+ * getDebug() - Get current debug state
+ * setDebug(enabled) - Set debug state (persists to config)
  *   LISTENERS (main -> renderer):
- *     - onFilesDownloaded(cb) - Download complete
- *     - onPeerConnected(cb) - Peer joined
- *     - onPeerDisconnected(cb) - Peer left
- *     - onUploadProgress(cb) - Transfer progress
- *     - onUploadComplete(cb) - Transfer complete
- *     - onDownloadPeerDisconnected(cb) - Sender went offline
- *     - onDriveReadyToDownload(cb) - Resumed drive ready to continue download
- *     - onDrivesUpdated(cb) - Drive added/removed/updated
- * 
+ * onFilesDownloaded(cb) - Download complete
+ * onPeerConnected(cb) - Peer joined
+ * onPeerDisconnected(cb) - Peer left
+ * onUploadProgress(cb) - Transfer progress
+ * onUploadComplete(cb) - Transfer complete
+ * onDownloadPeerDisconnected(cb) - Sender went offline
+ * onDriveReadyToDownload(cb) - Resumed drive ready to continue download
+ * onDrivesUpdated(cb) - Drive added/removed/updated
  * EXTERNAL CALLS: Electron contextBridge, ipcRenderer
  */
 const { contextBridge, ipcRenderer } = require('electron');
@@ -112,5 +106,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onUploadComplete: (callback) => ipcRenderer.on('upload-complete', callback),
     onDownloadPeerDisconnected: (callback) => ipcRenderer.on('download-peer-disconnected', callback),
     onDriveReadyToDownload: (callback) => ipcRenderer.on('drive-ready-to-download', callback),
-    onDrivesUpdated: (callback) => ipcRenderer.on('drives-updated', callback)
+    onDrivesUpdated: (callback) => ipcRenderer.on('drives-updated', callback),
+    // Runtime resume-failure signal (boot-time failures also travel in the
+    // drives-updated action:'loaded' payload; this channel exists for post-init
+    // failures and future-proofing).
+    onDriveResumeFailed: (callback) => ipcRenderer.on('drive-resume-failed', callback)
 });

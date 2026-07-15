@@ -1,6 +1,6 @@
 {
   "name": "peardrop",
-  "version": "0.24.1",
+  "version": "0.25.0",
   "description": "Simple, elegant P2P file sharing using pearcore",
   "main": "main.js",
   "type": "commonjs",
@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "bs58": "^6.0.0",

@@ -1027,6 +1027,117 @@
             font-weight: 600;
         }
 
+        /* Receive-selection modal.
+           Wraps the pre-download selection flow. Matches modal-overlay/modal
+           conventions but overrides max-width to fit a scrollable file list. */
+        .receive-selection-modal {
+            max-width: 420px;
+        }
+
+        .receive-selection-modal .modal-subtitle {
+            /* Tighter margin — the count/bytes footer carries the summary. */
+            margin-bottom: 12px;
+        }
+
+        .receive-selection-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .receive-selection-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.75);
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 5px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .receive-selection-toggle:hover {
+            background: rgba(255, 255, 255, 0.07);
+        }
+
+        .receive-selection-truncated {
+            font-size: 11px;
+            color: rgba(255, 190, 90, 0.85);
+            margin-bottom: 8px;
+        }
+
+        .receive-selection-list {
+            max-height: 40vh;
+            overflow-y: auto;
+            background: rgba(10, 10, 10, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            padding: 6px;
+            margin-bottom: 10px;
+        }
+
+        .receive-selection-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.12s ease;
+        }
+
+        .receive-selection-row:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .receive-selection-row input[type="checkbox"] {
+            accent-color: #a8ce38;
+            width: 15px;
+            height: 15px;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
+        .receive-selection-icon {
+            font-size: 15px;
+            flex-shrink: 0;
+        }
+
+        .receive-selection-name {
+            flex: 1;
+            min-width: 0;
+            font-size: 13px;
+            color: rgba(255, 255, 255, 0.88);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .receive-selection-size {
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.5);
+            flex-shrink: 0;
+        }
+
+        .receive-selection-footer {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.6);
+            margin-bottom: 12px;
+        }
+
+        .modal-btn.primary:disabled,
+        .modal-btn.primary[disabled] {
+            background: rgba(70, 70, 70, 0.7);
+            color: rgba(255, 255, 255, 0.35);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
         /* QR Scanner Modal */
         .qr-scanner-modal {
             max-width: 380px;
@@ -1706,6 +1817,31 @@
         </div>
     </div>
 
+    <!-- Receive-selection modal.
+         Shown after hyperdriveOpen resolves, before any download. Gates the
+         download-fire on user confirmation with an optional per-file subset.
+         Standalone: no coupling to drive-item's post-download review state. -->
+    <div class="modal-overlay" id="receiveSelectionModal">
+        <div class="modal receive-selection-modal">
+            <div class="modal-title" id="receiveSelectionTitle">Download share</div>
+            <div class="modal-subtitle" id="receiveSelectionSubtitle">Choose which files to receive</div>
+            <div class="receive-selection-truncated" id="receiveSelectionTruncated" style="display:none;"></div>
+            <div class="receive-selection-toolbar">
+                <button type="button" class="receive-selection-toggle" id="receiveSelectionToggleAll">
+                    <span id="receiveSelectionToggleLabel">Select none</span>
+                </button>
+                <div class="receive-selection-footer" style="margin: 0;" id="receiveSelectionCount">0 files</div>
+            </div>
+            <div class="receive-selection-list" id="receiveSelectionList">
+                <!-- Rows inserted dynamically -->
+            </div>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" id="receiveSelectionCancelBtn">Cancel</button>
+                <button class="modal-btn primary" id="receiveSelectionConfirmBtn">Download all</button>
+            </div>
+        </div>
+    </div>
+
     <!-- QR Scanner Modal -->
     <div class="modal-overlay" id="qrScannerModal">
         <div class="modal qr-scanner-modal">
@@ -1788,6 +1924,9 @@
     <!-- Load modules -->
     <!-- ui-utils MUST load first: shared formatting helpers the components delegate to -->
     <script src="lib/ui-utils.js"></script>
+    <script src="lib/selection-logic.js"></script>
+    <script src="lib/status-mapping.js"></script>
+    <script src="lib/dup-check-action.js"></script>
     <script src="lib/scroll-list/scroll-list.js"></script>
     <script src="lib/drive-item/drive-item.js"></script>
     <script src="lib/drive-item/drive-info-panel.js"></script>

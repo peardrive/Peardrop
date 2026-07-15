@@ -1,63 +1,56 @@
 /**
  * MODULE: main.js (PearDrop v2)
  * PURPOSE: Electron main process for PearDrop - P2P file sharing
- * VERSION: 0.24.1
- * 
+ * VERSION: 0.24.0
  * EXPORTS: None (entry point)
- * 
  * FUNCTIONS:
- *   - createWindow() - Creates main BrowserWindow with platform-aware styling
- *   - initializeApp() - Ensures app directories exist, loads config
- *   - setupIPC() - Registers all IPC handlers for renderer
- * 
+ * createWindow() - Creates main BrowserWindow with platform-aware styling
+ * initializeApp() - Ensures app directories exist, loads config
+ * setupIPC() - Registers all IPC handlers for renderer
  * IPC HANDLERS (renderer can invoke):
  *   Hyperdrive:
- *     - 'hyperdrive-share' - Create share from files, returns link
- *     - 'hyperdrive-check-duplicate' - Fast local duplicate check
- *     - 'hyperdrive-open' - Connect to remote drive (includes dedup check)
- *     - 'hyperdrive-download' - Download files from opened drive
+ * 'hyperdrive-share' - Create share from files, returns link
+ * 'hyperdrive-check-duplicate' - Fast local duplicate check
+ * 'hyperdrive-open' - Connect to remote drive (includes dedup check)
+ * 'hyperdrive-download' - Download files from opened drive
  *   HyperdriveManager (UI Interface):
- *     - 'drive-get' - Get single drive by ID
- *     - 'drives-list' - Get all tracked drives
- *     - 'drives-pause' - Pause seeding (keep data)
- *     - 'drives-resume' - Resume seeding
- *     - 'drives-remove' - Delete drive completely
+ * 'drive-get' - Get single drive by ID
+ * 'drives-list' - Get all tracked drives
+ * 'drives-pause' - Pause seeding (keep data)
+ * 'drives-resume' - Resume seeding
+ * 'drives-remove' - Delete drive completely
  *   Utilities:
- *     - 'open-downloads' - Open downloads folder in Finder/Explorer
- *     - 'open-file' - Open file in default application
- *     - 'show-file-in-folder' - Reveal file in Finder/Explorer
- *     - 'get-files-stats' - Get file/folder stats with folder expansion
- *     - 'generate-qr' - Generate QR data URL for a string
- *     - 'get-app-version' - App version (reset-notice gating)
- *     - 'check-legacy-data-present' - Detect pre-unified state files
- *     - 'get-file-thumbnail' - Image src or OS-native icon for a file
- *     - 'get-debug' - Get current debug state
- *     - 'set-debug' - Set debug state (persists to config)
- * 
+ * 'open-downloads' - Open downloads folder in Finder/Explorer
+ * 'open-file' - Open file in default application
+ * 'show-file-in-folder' - Reveal file in Finder/Explorer
+ * 'get-files-stats' - Get file/folder stats with folder expansion
+ * 'generate-qr' - Generate QR data URL for a string
+ * 'get-app-version' - App version (reset-notice gating)
+ * 'check-legacy-data-present' - Detect pre-unified state files
+ * 'get-file-thumbnail' - Image src or OS-native icon for a file
+ * 'get-debug' - Get current debug state
+ * 'set-debug' - Set debug state (persists to config)
  * IPC EVENTS SENT (to renderer):
- *   - 'peer-connected' - Peer joined (upload) or download starting
- *   - 'peer-disconnected' - Peer left
- *   - 'upload-progress' - Transfer progress update
- *   - 'upload-complete' - Transfer finished
- *   - 'files-downloaded' - Download complete with file list
- *   - 'drives-updated' - Drive added/removed/changed
- *   - 'download-peer-disconnected' - Sender went offline during download
- * 
+ * 'peer-connected' - Peer joined (upload) or download starting
+ * 'peer-disconnected' - Peer left
+ * 'upload-progress' - Transfer progress update
+ * 'upload-complete' - Transfer finished
+ * 'files-downloaded' - Download complete with file list
+ * 'drives-updated' - Drive added/removed/changed
+ * 'download-peer-disconnected' - Sender went offline during download
  * EXTERNAL CALLS:
- *   - lib/hyperdrive-manager.js (manager singleton) - Single source of truth for drives
- *   - lib/downloader.js (downloadFromDrive)
- *   - lib/file-utils.js (formatBytes, formatSpeed)
- *   - lib/logger.js (createLogger, loadConfig, setDebug)
- * 
+ * lib/hyperdrive-manager.js (manager singleton) - Single source of truth for drives
+ * lib/downloader.js (downloadFromDrive)
+ * lib/file-utils.js (formatBytes, formatSpeed)
+ * lib/logger.js (createLogger, loadConfig, setDebug)
  * KEY STATE:
- *   - mainWindow - BrowserWindow instance
- *   - APP_DATA_DIR - ~/peardrop
- *   - DOWNLOADS_DIR - ~/peardrop/downloads
- * 
+ * mainWindow - BrowserWindow instance
+ * APP_DATA_DIR - ~/peardrop
+ * DOWNLOADS_DIR - ~/peardrop/downloads
  * PLATFORM SUPPORT:
- *   - macOS: Full glassmorphism, traffic lights, vibrancy
- *   - Windows: Standard title bar, solid background
- *   - Linux: Standard title bar, solid background
+ * macOS: Full glassmorphism, traffic lights, vibrancy
+ * Windows: Standard title bar, solid background
+ * Linux: Standard title bar, solid background
  */
 
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
@@ -71,7 +64,8 @@ const { manager: hyperdriveManager, DriveState } = require('./lib/hyperdrive-man
 // Download orchestration (✅ SAFE to modify)
 const { downloadFromDrive } = require('./lib/downloader');
 // Utilities
-const { formatBytes, formatSpeed } = require('./lib/file-utils');
+const { formatBytes, formatSpeed, normalizeUserPath } = require('./lib/file-utils');
+const { EngineError } = require('./lib/engine-errors');
 // Debug logging
 const { createLogger, loadConfig: loadDebugConfig, setDebug, isDebugEnabled } = require('./lib/logger');
 const log = createLogger('PearDrop');
@@ -196,33 +190,63 @@ function setupIPC() {
     // Hyperdrive File Sharing
     // ========================================================================
 
-    // Create a shareable link for files.
-    // GLUE ONLY: createDrive() is the single writer of the manifest entry —
-    // it creates the drive, records it, and returns the link + entry. This
-    // handler used to build and write a SECOND entry via addDriveEntry with a
-    // different schema, overwriting the first (discarding discoveryKey and
-    // per-file in-drive paths). Fixed 2026-07-03. Do not add logic here.
+    // Create a shareable link for files
     ipcMain.handle('hyperdrive-share', async (event, { files, options = {} }) => {
         try {
-            const result = await hyperdriveManager.createDrive(files, {
-                name: options.name
+            // Sanitize incoming paths at the boundary. Renderer-provided paths
+            // may carry file:// prefixes or drag-and-drop artifacts; normalize
+            // once here so downstream code can assume clean absolute paths.
+            const safeFiles = (files || []).map(f => {
+                if (!f || typeof f.path !== 'string') return f;
+                try {
+                    return { ...f, path: normalizeUserPath(f.path) };
+                } catch (err) {
+                    throw new Error(`Invalid path for "${f.name || f.path}": ${err.message}`);
+                }
             });
 
+            const result = await hyperdriveManager.createDrive(safeFiles, {
+                ttlMs: options.ttlMs || 0,
+                name: options.name
+            });
+            
             console.log('[PearDrop] Share created:', result.shareLink);
 
-            // Notify renderer about the new drive entry
+            // Calculate total bytes from files
+            const totalBytes = safeFiles.reduce((sum, f) => sum + (f.size || 0), 0);
+            const shareName = options.name || (safeFiles.length === 1 ? safeFiles[0].name : `${safeFiles.length} files`);
+
+            // Add to drives state (single source of truth for UI)
+            const driveEntry = await hyperdriveManager.addDriveEntry({
+                id: result.driveId,
+                key: result.key,
+                shareLink: result.shareLink,
+                name: shareName,
+                files: safeFiles.map(f => ({
+                    name: f.name,
+                    path: f.path,
+                    size: f.size
+                })),
+                totalBytes: totalBytes,
+                localPath: safeFiles[0]?.path ? path.dirname(safeFiles[0].path) : null,
+                storagePath: path.join(hyperdriveManager.drivesDir, result.driveId),
+                state: DriveState.ACTIVE,
+                isUpload: true
+            });
+            
+            // Notify renderer about new drive entry
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('drives-updated', {
                     action: 'added',
-                    entry: result.entry
+                    entry: driveEntry
                 });
             }
-
+            
             return {
                 success: true,
                 driveId: result.driveId,
                 shareLink: result.shareLink,
-                driveEntryId: result.driveId
+                driveEntryId: driveEntry.id
             };
         } catch (error) {
             console.error('[PearDrop] Share failed:', error);
@@ -295,32 +319,52 @@ function setupIPC() {
                 shareName: result.shareName,
                 totalBytes: result.totalBytes,
                 hasManifest: result.hasManifest,
-                peerConnected: result.peerConnected
+                peerConnected: result.peerConnected,
+                truncated: result.truncated
             };
         } catch (error) {
             console.error('[PearDrop] Open failed:', error);
-            return { success: false, error: error.message };
+            // Receive-path handler: attach structured errorDetail alongside the
+            // legacy string `error` so renderers keep working while future code
+            // can branch on errorDetail.category. Non-EngineError caught here
+            // (e.g. programmer bugs) get no errorDetail rather than a fake one.
+            return {
+                success: false,
+                error: error.message,
+                ...(error instanceof EngineError ? { errorDetail: error.toJSON() } : {}),
+            };
         }
     });
 
     // Download files from an opened drive
     // Uses lib/downloader.js (✅ SAFE module - can be modified without touching sacred code)
-    ipcMain.handle('hyperdrive-download', async (event, { driveId, destDir }) => {
+    ipcMain.handle('hyperdrive-download', async (event, { driveId, destDir, fileNames }) => {
         try {
             const session = hyperdriveManager.activeDrives.get(driveId);
             if (!session) {
-                throw new Error('Session not found');
+                throw new EngineError({
+                    category: 'receive.no-session',
+                    cause: 'session-not-found',
+                    message: 'Session not found',
+                });
             }
-            
+
             const downloadPath = destDir || DOWNLOADS_DIR;
-            
+
             console.log('[PearDrop] Download starting via downloader module');
-            
-            // Use the downloader module with callbacks for UI updates
+
+            // `fileNames` pass-through for per-file selection.
+            // Dormant today — no renderer callsite passes it (verified by
+            // grep). When 4E-ui lands and the caller starts sending a subset,
+            // the caller should also compute a subset-scoped `totalBytes` so
+            // downloader.js's byte-percent tracks the selection instead of the
+            // whole-drive total. Passing `session.totalBytes` unchanged today
+            // is correct because `fileNames` is absent.
             const result = await downloadFromDrive(session.drive, {
                 destDir: downloadPath,
                 totalBytes: session.totalBytes || 0,
                 shareName: session.shareName,
+                fileNames,
                 
                 onPeerConnected: (data) => {
                     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -359,33 +403,34 @@ function setupIPC() {
                 }
             });
             
-            // UPDATE the existing recv_ entry (openDrive already created it in
-            // 'seeking' state) — do NOT re-add. Re-adding was a second
-            // double-write that replaced the entry wholesale. Fixed 2026-07-03.
-            const driveEntry = await hyperdriveManager.updateDriveEntry(driveId, {
+            // Add to drives state (single source of truth)
+            const driveEntry = await hyperdriveManager.addDriveEntry({
+                id: driveId,
+                key: session.metadata?.key,
+                shareLink: session.shareLink || `peardrop://${session.metadata?.key || 'unknown'}`,
+                name: session.shareName,
                 files: result.files,
                 totalBytes: result.totalBytes,
                 localPath: downloadPath,
-                state: DriveState.ACTIVE,  // download done → now seeding
-                isUpload: false
+                storagePath: path.join(hyperdriveManager.drivesDir, driveId),
+                state: DriveState.ACTIVE,
+                isUpload: false  // This is a download
             });
             
             // Mark session as seeding mode
             if (session) {
                 session.isSeeding = true;
-                session.driveEntryId = driveId;
+                session.driveEntryId = driveEntry.id;
             }
-
-            console.log('[PearDrop] Download complete, now seeding:', driveEntry?.name || driveId);
-
-            // Notify renderer (NOTE: was driveEntry.id — a field that doesn't
-            // exist on manifest entries (they use driveId) — so this event
-            // carried driveId: undefined. Fixed 2026-07-03.)
+            
+            console.log('[PearDrop] Download complete, now seeding:', driveEntry.name);
+            
+            // Notify renderer
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('files-downloaded', {
                     files: result.files,
                     downloadPath,
-                    driveId,
+                    driveId: driveEntry.id,
                     isSeeding: true
                 });
                 
@@ -396,10 +441,18 @@ function setupIPC() {
                 });
             }
             
-            return { success: true, files: result.files, downloadPath, driveId };
+            return { success: true, files: result.files, downloadPath, driveId: driveEntry.id };
         } catch (error) {
             console.error('[PearDrop] Download failed:', error);
-            return { success: false, error: error.message };
+            // Receive-path handler: attach structured errorDetail when the
+            // error is typed. See hyperdrive-open handler above for the
+            // rationale (renderer keeps its string `error` field; new code
+            // can branch on errorDetail.category).
+            return {
+                success: false,
+                error: error.message,
+                ...(error instanceof EngineError ? { errorDetail: error.toJSON() } : {}),
+            };
         }
     });
 
@@ -711,16 +764,24 @@ function setupIPC() {
         }
         
         const results = [];
-        
-        for (const filePath of filePaths) {
+
+        for (const rawPath of filePaths) {
+            let filePath;
+            try {
+                filePath = normalizeUserPath(rawPath);
+            } catch (err) {
+                console.error('[PearDrop] Skipping invalid path:', rawPath, err.message);
+                continue;
+            }
+
             try {
                 const stats = await fs.stat(filePath);
-                
+
                 if (stats.isDirectory()) {
                     // For folders: calculate total size and enumerate contents
                     const totalSize = await getFolderSize(filePath);
                     const contents = await enumerateFolderContents(filePath);
-                    
+
                     results.push({
                         path: filePath,
                         name: path.basename(filePath),
@@ -729,8 +790,8 @@ function setupIPC() {
                         fileCount: contents.length,
                         contents: contents
                     });
-                    
-                    console.log('[PearDrop] Folder stat:', path.basename(filePath), 
+
+                    console.log('[PearDrop] Folder stat:', path.basename(filePath),
                         `${contents.length} files, ${formatBytes(totalSize)}`);
                 } else {
                     // Regular file
@@ -745,7 +806,7 @@ function setupIPC() {
                 console.error('[PearDrop] Failed to stat:', filePath, error.message);
             }
         }
-        
+
         return results;
     });
 }
@@ -805,18 +866,41 @@ app.whenReady().then(async () => {
                 mainWindow.webContents.send('drive-ready-to-download', data);
             }
         });
+
+        // Resume-failure signal. The manager emits this from _resumeActiveDrives
+        // when a per-drive hydrate throws. The manifest state is deliberately
+        // NOT flipped to ERRORED (see hyperdrive-manager.js:1420-1424), so the
+        // renderer needs this signal to tell the truth about "tracked but not
+        // actually running" drives. The event goes out as a distinct IPC
+        // channel for runtime/future-proofing; the boot-time snapshot also
+        // travels in the `drives-updated action:'loaded'` payload below.
+        hyperdriveManager.on('drive-resume-failed', (data) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('drive-resume-failed', data);
+            }
+        });
         
         // Initialize Hyperdrive manager with clean, accurate manifest (after event listeners are set up)
         await hyperdriveManager.init();
         
-        // Notify frontend that drives have been loaded
+        // Notify frontend that drives have been loaded. Include the boot
+        // snapshot of resumeErrors so drives that failed to hydrate can be
+        // rendered as `inactive` on first paint — otherwise their manifest
+        // state (which stays `active`/`seeking` by design) would silently
+        // render them as "Sharing". See status-mapping.js for the merge rule.
         if (mainWindow && !mainWindow.isDestroyed()) {
             const drives = hyperdriveManager.getAllDriveEntries();
+            const resumeErrors = {};
+            for (const [id, info] of hyperdriveManager.resumeErrors) {
+                resumeErrors[id] = { error: info.error, at: info.at };
+            }
             mainWindow.webContents.send('drives-updated', {
                 action: 'loaded',
-                drives: drives
+                drives: drives,
+                resumeErrors
             });
-            console.log('[PearDrop] Notified frontend of loaded drives:', drives.length);
+            console.log('[PearDrop] Notified frontend of loaded drives:', drives.length,
+                Object.keys(resumeErrors).length ? `(${Object.keys(resumeErrors).length} resume failure(s))` : '');
         }
         
         console.log('[PearDrop] Ready');

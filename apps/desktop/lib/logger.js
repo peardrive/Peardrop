@@ -1,23 +1,18 @@
 /**
  * MODULE: lib/logger.js
  * PURPOSE: Centralized debug logging with runtime toggle
- * 
  * EXPORTS:
- *   - createLogger(namespace) - Create namespaced logger
- *   - setDebug(enabled) - Enable/disable debug logging
- *   - isDebugEnabled() - Check current debug state
- *   - loadConfig() - Load debug state from config file (main process only)
- * 
+ * createLogger(namespace) - Create namespaced logger
+ * setDebug(enabled) - Enable/disable debug logging
+ * isDebugEnabled() - Check current debug state
+ * loadConfig() - Load debug state from config file (main process only)
  * USAGE:
  *   const log = require('./logger').createLogger('HyperdriveManager');
- *   log('Starting download', { id: 123 });  // [HyperdriveManager] Starting download { id: 123 }
- *   
+ * log('Starting download', { id: 123 }); // [HyperdriveManager] Starting download { id: 123 }
  *   // Toggle at runtime:
  *   require('./logger').setDebug(false);
- * 
  * CONFIG FILE: ~/peardrop/config.json
  *   { "debug": true }
- * 
  * EXTERNAL CALLS: fs (for config loading in main process)
  */
 
