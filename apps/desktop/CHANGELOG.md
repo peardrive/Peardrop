@@ -1,5 +1,20 @@
 # PearDrop Changelog
 
+## v0.25.1 (2026-07-16) - Downloads That Wait For Their Sender ⏳
+
+**Fixed the offline-provider dead end**: pasting a link while the sender was offline created a drive that was never saved (gone after reboot) and never reacted when the sender finally came online. Found live in Mac↔mobile testing with a sender that had been closed for an hour.
+
+### Fixed
+- **Seeking drives persist immediately**: `openDrive` writes the manifest entry up-front with `manifestLoaded: false` — the explicit marker for "blank because no provider has connected yet", never confused with "share is empty". The entry survives reboots and keeps announcing until the user removes it
+- **Late-arriving senders now trigger the download**: new single hydration path (`_hydrateReceivingDrive`) runs from every swarm connection — whether the sender appears five seconds or five days after the link was added, on a fresh add or after any number of reboots: manifest read → entry persisted → `drive-ready-to-download` → auto-download. Previously the manifest read only happened inline during the open/resume call, so a peer connecting after that moment was silently ignored (both in `openDrive` and in the boot-resume path)
+- **A peer with no drive data doesn't fake a hydration**: another downloader connecting on the same topic leaves the entry un-hydrated so the real provider still triggers the download later
+- **Dup-check knows about seeking**: pasting a link that's already waiting highlights the existing row ("Already in your list — waiting for the sender") instead of offering a bogus re-download; the pre-5A false "Already downloaded" stub bug stays fixed because seeking entries are now first-class, not accidents
+- **Renderer waiting row uses the real driveId** so the late `drive-ready-to-download` event converts it into a live download (replaces the old `TODO: retry/listen mechanism` dead end)
+- **MaxListenersExceededWarning gone**: ProgressTracker is a shared singleton with one listener pair per resumed drive; cap lifted (listener lifecycle already managed by stopDrive)
+
+### Added
+- **P2P integration harness** (`test/integration/offline-provider.harness.js`, `npm run test:p2p`): real-DHT tests for online transfer, offline-provider add, and reboot-survival — the scenarios that can't be verified with two clients that are always online at the same time
+
 ## v0.24.1 (2026-07-03) - Shares That Actually Survive 🔁
 
 **Fixed the full chain of bugs that silently stopped shares from announcing after restarts.** Verified with a real Mac→Linux transfer.

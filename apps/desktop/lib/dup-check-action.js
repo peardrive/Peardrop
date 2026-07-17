@@ -23,7 +23,7 @@
  * EXPORTS (via window.PearDupCheckAction, also module.exports for tests):
  * decideDupCheckAction(dupCheckResult)
  *       → { action: 'proceed' | 'block' | 'confirm-redownload',
- *           driveId?, existingDrive? }
+ *           reason?: 'seeking', driveId?, existingDrive? }
  * KEY STATE: none (pure functions)
  */
 (function (root) {
@@ -37,6 +37,21 @@
         }
 
         // Duplicate — branch on localStatus.
+
+        // Still seeking (provider never seen; manifestLoaded === false on the
+        // backend entry): the drive is already in the list waiting for its
+        // sender. Block the re-open and let the renderer highlight the
+        // existing row — this is NOT the "files missing, offer re-download"
+        // case, which is reserved for drives that actually downloaded once.
+        if (result.localStatus === 'seeking') {
+            return {
+                action: 'block',
+                reason: 'seeking',
+                driveId: result.driveId,
+                existingDrive: result.existingDrive || null,
+            };
+        }
+
         if (result.localStatus === 'missing') {
             return {
                 action: 'confirm-redownload',

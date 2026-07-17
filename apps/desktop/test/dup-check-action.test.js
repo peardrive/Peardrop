@@ -29,6 +29,22 @@ test('duplicate + localStatus:available → block', () => {
     assert.equal(out.existingDrive.name, 'MyShare');
 });
 
+test('duplicate + localStatus:seeking → block with reason (already waiting, NOT re-download)', () => {
+    // A seeking entry (manifestLoaded: false — provider never seen) must not
+    // fall into the 'missing' → confirm-redownload branch: the drive never
+    // downloaded anything, it's simply still waiting for its sender. Block
+    // and let the renderer highlight the existing row.
+    const out = decideDupCheckAction({
+        isDuplicate: true,
+        localStatus: 'seeking',
+        driveId: 'recv_wait1',
+        existingDrive: { id: 'recv_wait1', name: 'Waiting for sender...' },
+    });
+    assert.equal(out.action, 'block');
+    assert.equal(out.reason, 'seeking');
+    assert.equal(out.driveId, 'recv_wait1');
+});
+
 test('duplicate + localStatus:missing → confirm-redownload (the Cluster 3 fix)', () => {
     const out = decideDupCheckAction({
         isDuplicate: true,

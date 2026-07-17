@@ -260,6 +260,18 @@ function setupIPC() {
         const existingDrive = hyperdriveManager.getDriveEntryByKey(driveKey);
         
         if (existingDrive) {
+            // A seeking entry that never saw its provider is NOT "downloaded
+            // with files missing" — it's already in the list, waiting. Report
+            // it as 'seeking' so the renderer highlights it instead of
+            // offering a re-download.
+            if (existingDrive.state === 'seeking' && existingDrive.manifestLoaded === false) {
+                return {
+                    isDuplicate: true,
+                    localStatus: 'seeking',
+                    existingDrive: existingDrive,
+                    driveId: existingDrive.id
+                };
+            }
             const localAvailable = await hyperdriveManager.checkLocalAvailability(existingDrive.id);
             return {
                 isDuplicate: true,
@@ -268,7 +280,7 @@ function setupIPC() {
                 driveId: existingDrive.id
             };
         }
-        
+
         return { isDuplicate: false };
     });
 
@@ -286,14 +298,32 @@ function setupIPC() {
                 const existingDrive = hyperdriveManager.getDriveEntryByKey(driveKey);
                 
                 if (existingDrive) {
+                    // Already-seeking entry (provider never seen): report as
+                    // 'seeking', not 'missing' — see hyperdrive-check-duplicate.
+                    if (existingDrive.state === 'seeking' && existingDrive.manifestLoaded === false) {
+                        console.log('[PearDrop] Duplicate detected (still seeking):', {
+                            driveKey: driveKey.slice(0, 12) + '...'
+                        });
+                        return {
+                            success: true,
+                            isDuplicate: true,
+                            localStatus: 'seeking',
+                            existingDrive: existingDrive,
+                            driveId: existingDrive.id,
+                            shareName: existingDrive.name,
+                            totalBytes: existingDrive.totalBytes,
+                            localPath: existingDrive.localPath
+                        };
+                    }
+
                     // Check if local files still exist
                     const localAvailable = await hyperdriveManager.checkLocalAvailability(existingDrive.id);
-                    
+
                     console.log('[PearDrop] Duplicate detected:', {
                         driveKey: driveKey.slice(0, 12) + '...',
                         localAvailable
                     });
-                    
+
                     // Return duplicate info - let renderer decide what to do
                     return {
                         success: true,

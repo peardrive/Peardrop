@@ -28,7 +28,13 @@ const { EventEmitter } = require('events')
 class ProgressTracker extends EventEmitter {
   constructor() {
     super()
-    
+
+    // The manager legitimately adds one progress + one complete listener per
+    // resumed drive on this shared singleton; the default cap of 10 fired
+    // MaxListenersExceededWarning at ~11 drives (users run 20+). Unlimited —
+    // listener lifecycle is managed by stopDrive via trackerHandlers.
+    this.setMaxListeners(0)
+
     // Track active transfers: Map<peerId, TransferState>
     this.transfers = new Map()
     

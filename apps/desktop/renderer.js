@@ -533,7 +533,9 @@ async function startDownload() {
 
     if (decision.action === 'block') {
         highlightExistingDrive(decision.driveId);
-        showAlreadyDownloadedMessage('Already downloaded');
+        showAlreadyDownloadedMessage(decision.reason === 'seeking'
+            ? 'Already in your list — waiting for the sender to come online'
+            : 'Already downloaded');
         return;
     }
 
@@ -592,16 +594,24 @@ async function startDownload() {
     const hasPeer = openResult.peerConnected === true;
     const hasData = openResult.shareName && openResult.files?.length > 0;
     
-    // No peer and no data - stay in connecting state
+    // No peer and no data - the backend has persisted the entry as seeking
+    // (manifestLoaded: false) and keeps announcing until the sender appears,
+    // even across reboots. Swap the placeholder for a row keyed by the REAL
+    // driveId so the backend's later 'drive-ready-to-download' event (late-
+    // arriving provider → _hydrateReceivingDrive) finds this row and converts
+    // it into a live download.
     if (!hasPeer && !hasData) {
-        console.log('[PearDrop] No peer connected, staying in connecting state');
-        // Just update the tempId to use real driveId, keep status as connecting
-        updateDriveInList({ 
-            id: tempId, 
-            title: 'Waiting for peer...',
-            status: 'connecting'
+        console.log('[PearDrop] No peer connected - entry persisted, waiting for sender', driveId);
+        removeDriveFromList(tempId);
+        addDriveToList({
+            id: driveId,
+            title: 'Waiting for sender...',
+            status: 'connecting',
+            progress: 0,
+            peers: 0,
+            type: 'download',
+            shareLink: link
         });
-        // TODO: Could set up a retry/listen mechanism here
         return;
     }
     

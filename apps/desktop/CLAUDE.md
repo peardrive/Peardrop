@@ -59,7 +59,27 @@ See: `~/Projects/ENGINEERING-PRINCIPLES.md` Rule #9
 
 ---
 
-## Current State (v0.24.1 - 2026-07-03)
+## Current State (v0.25.1 - 2026-07-16)
+
+**v0.25.1 — offline-provider receives fixed.** Adding a link while the sender
+is offline now: persists immediately (state `seeking`, `manifestLoaded: false`),
+survives reboots, keeps announcing, and auto-downloads whenever the sender
+finally appears (`_hydrateReceivingDrive`, triggered from every swarm
+connection). Verified by the real-DHT harness: `npm run test:p2p` (online /
+offline-provider / reboot-survival). See Rules below and CHANGELOG v0.25.1.
+
+> ⚠️ **ENGINE PARITY DEBT (2026-07-16):** the mobile backend
+> (`apps/mobile/backend/hyperdrive-engine.mjs`) still has the equivalent bug in
+> different clothes: it persists SEEKING up-front but (a) boot
+> `cleanupInFlightManifestEntries()` DELETES all SEEKING entries as crash
+> debris, (b) a no-peer open transitions to ACTIVE with `files: []` (the exact
+> "blank because empty" confusion), (c) no late-connection hydration. Wire
+> compatibility is unaffected (manifest schema/links/topics unchanged), but the
+> UX parity port is pending — see the plan in the session notes / ask Guy.
+
+---
+
+## Previous State (v0.24.1 - 2026-07-03)
 
 **PearDrop is WORKING — verified with a real Mac→Linux transfer.** Core P2P:
 - ✅ Share files → get `peardrop://` link
@@ -201,6 +221,17 @@ failed once.
 > **STATE PERSISTENCE:** App lifecycle events (quit, boot, crash) must NEVER
 > change a drive's persisted state. Only explicit user actions (pause, resume,
 > remove) write state. Transient failures stay in-memory.
+
+> **RECEIVE PERSISTENCE (v0.25.1):** A receiving drive is persisted the moment
+> the user adds it (state `seeking`, `manifestLoaded: false`) and is removed
+> ONLY by explicit user action — never by timeouts, reboots, or cleanup passes.
+> `manifestLoaded` is the truth flag: false = "blank only because no provider
+> has connected yet"; it must never be conflated with "share is empty" or
+> "files missing". `_hydrateReceivingDrive` is the ONLY code that reads a
+> remote share's manifest — idempotent, and hooked into EVERY swarm connection
+> (open, resume, and late arrivals), never only inline at open time. Dup-check
+> reports such entries as localStatus 'seeking' (block + highlight), not
+> 'missing' (re-download offer).
 
 ---
 

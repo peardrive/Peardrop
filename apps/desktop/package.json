@@ -1,6 +1,6 @@
 {
   "name": "peardrop",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "description": "Simple, elegant P2P file sharing using pearcore",
   "main": "main.js",
   "type": "commonjs",
@@ -10,7 +10,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test test/",
+    "test:p2p": "node test/integration/offline-provider.harness.js online && node test/integration/offline-provider.harness.js offline && node test/integration/offline-provider.harness.js reboot"
   },
   "dependencies": {
     "bs58": "^6.0.0",

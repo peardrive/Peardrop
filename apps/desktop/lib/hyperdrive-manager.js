@@ -9,7 +9,9 @@
  *   Core P2P:
  * init() - Load state, ensure directories, cleanup incomplete, resume active
  * createDrive(files, options) - Create share with manifest, join swarm
- * openDrive(shareLink) - Connect to remote drive, read manifest
+ * openDrive(shareLink) - Connect to remote drive; persists seeking entry up-front
+ * _hydrateReceivingDrive(driveId, opts) - Single hydration path: manifest read,
+ *     persist (manifestLoaded:true), emit ready-to-download; peer-arrival safe
  * stopDrive(driveId, options) - Leave swarm, close drive; opts: delete, persistState
  * stopAll(options) - Stop all active drives
  * getStatus() - Return active/stopped drives and stats
@@ -40,12 +42,17 @@
  * 'upload-complete' - { driveId, peerId, totalBytes, duration }
  * 'drive-created' - { driveId, shareLink, metadata }
  * 'drive-stopped' - { driveId, deleted }
+ * 'drive-ready-to-download' - { driveId, shareLink, shareName, totalBytes, files }
+ *     (fired on hydration: at resume with provider online, or whenever a
+ *      late provider connects to a seeking drive)
  * EXTERNAL CALLS:
  * Corestore, Hyperdrive, Hyperswarm (holepunch P2P stack)
  * ./progress-tracker.js (tracker singleton)
  * KEY STATE:
  * activeDrives (Map) - driveId -> { drive, store, swarm, metadata }
  * manifest (Object) - Persistent tracking: drives{}, stats{}
+ *     drive entries carry manifestLoaded (bool): false = blank only because
+ *     no provider connected yet (seeking); true = data reflects provider
  * KEY CONSTANTS:
  * DRIVE_MANIFEST_PATH - '/.peardrop.json' (in-drive metadata)
  * DRIVES_STATE_FILE - ~/peardrop/drives-state.json (local tracking)
@@ -511,80 +518,114 @@ class HyperdriveManager extends EventEmitter {
     const driveId = `recv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const drivePath = path.join(this.drivesDir, driveId)
 
-    // Persistence deferred until a peer actually connects (see the post-peer
-    // addDriveEntry below). The pre-peer stub used to live here — but if
-    // the open was cancelled OR the app was killed during the seeking window,
-    // the stub survived in drives-state.json with `files: []` and a matching
-    // key, which then produced a false "Already downloaded" duplicate hit on
-    // the next paste of the same link (Cluster 3 in the 5A investigation).
-    // Not persisting until peer contact means every path through this
-    // function ends with either "manifest has a real entry" or "manifest
-    // has no entry" — no orphan stubs.
-
     console.log('[HyperdriveManager] Opening remote drive', { driveId, key: key.slice(0, 16) + '...' })
-    
+
     // Create isolated Corestore session
     const store = new Corestore(drivePath)
     await store.ready()
-    
+
     // Open the remote drive by key
     const drive = new Hyperdrive(store, Buffer.from(key, 'hex'))
     await drive.ready()
-    
+
+    // Persist the entry IMMEDIATELY, before any peer is found.
+    // `manifestLoaded: false` is the explicit marker for "blank only because
+    // no provider has connected yet" — distinct from a share that is
+    // genuinely empty. The entry survives reboots (init() resumes seeking
+    // drives) and keeps looking for the sender until the user removes it.
+    // The old "defer persistence until peer contact" approach (Cluster 3 in
+    // the 5A investigation) prevented stub entries by not writing them — at
+    // the cost of silently losing every offline-provider add. Pre-peer
+    // entries are now legitimate, first-class seeking entries: dup-check
+    // reports them as localStatus 'seeking' instead of 'missing', so the
+    // false "Already downloaded" hit that motivated the deferral can't
+    // come back. Removal paths: user cancel (cleanup below) or drives-remove.
+    await this.addDriveEntry({
+      driveId,
+      key: drive.key.toString('hex'),
+      discoveryKey: drive.discoveryKey.toString('hex'),
+      state: DriveState.SEEKING,
+      manifestLoaded: false,
+      shareLink,
+      isUpload: false,
+      files: [],
+      totalBytes: 0,
+      storagePath: drivePath,
+      createdAt: Date.now(),
+      name: 'Waiting for sender...'
+    })
+
     // Join swarm to find peers
     const swarm = new Hyperswarm()
-    
-    console.log('[HyperdriveManager] Joining swarm to find sender...', { 
-      driveId, 
+
+    // Register the session BEFORE any peer can connect so the late-hydration
+    // path (_hydrateReceivingDrive, called from the connection handler) can
+    // find it no matter when the provider shows up.
+    const session = {
+      driveId,
+      drive,
+      store,
+      swarm,
+      isReceiving: true,
+      manifest: null,
+      totalBytes: 0,
+      shareName: null,
+      shareLink,  // IMPORTANT: Save the original share link for history/re-sharing
+      metadata: { key },  // Save key for fallback link generation
+      createdAt: Date.now(),
+      hydrated: false,
+      hydrating: false
+    }
+    this.activeDrives.set(driveId, session)
+
+    console.log('[HyperdriveManager] Joining swarm to find sender...', {
+      driveId,
       discoveryKey: drive.discoveryKey.toString('hex').slice(0, 16) + '...'
     })
-    
+
     let peerConnected = false
     let peerDisconnected = false
     swarm.on('connection', (socket) => {
       peerConnected = true
       console.log('[HyperdriveManager] Connected to peer for download', { driveId })
       store.replicate(socket)
-      
+
       socket.on('error', (err) => {
         console.log('[HyperdriveManager] Download socket error', { driveId, error: err.message })
       })
-      
+
       socket.on('close', () => {
         peerDisconnected = true
         console.log('[HyperdriveManager] Download peer disconnected', { driveId })
         this.emit('download-peer-disconnected', { driveId })
       })
+
+      // Late-provider hydration: if the sender shows up AFTER this open call
+      // settled (openDrive already returned peerConnected:false), fetch the
+      // manifest and kick the download from here. While the open is still
+      // pending (entry in pendingConnections) the inline path below handles
+      // it instead. Idempotent — see _hydrateReceivingDrive.
+      if (!this.pendingConnections.has(driveId)) {
+        this._hydrateReceivingDrive(driveId).catch(err =>
+          console.log('[HyperdriveManager] Late hydration attempt failed (will retry on next peer)', { driveId, error: err.message }))
+      }
     })
-    
-    // Join swarm for persistent peer discovery (no timeout)
-    const topic = swarm.join(drive.discoveryKey)
-    
-    // Log DHT lookup progress
-    topic.flushed().then(() => {
-      console.log('[HyperdriveManager] DHT lookup complete', { driveId, peerConnected })
-    })
-    
-    await swarm.flush()
-    // REMOVED: done() - Keep seeking peers indefinitely
-    
-    console.log('[HyperdriveManager] Swarm flushed, waiting for drive update...', { driveId, peerConnected })
-    
-    // Track this pending connection so it can be aborted
+
+    // Track this pending connection so it can be aborted. Registered BEFORE
+    // swarm.join so the connection handler's `pendingConnections.has()` check
+    // can never race a fast peer into double-handling (inline + late paths).
     const pendingConnection = {
       driveId,
       aborted: false,
       cleanup: async () => {
         try {
+          this.activeDrives.delete(driveId)
           await swarm.destroy()
           await drive.close()
           await store.close()
           await fs.rm(drivePath, { recursive: true, force: true })
-          // Belt-and-braces: if any codepath ever creates an early manifest
-          // stub (pre-Sprint-5A there was one at line ~527), remove it here
-          // so a next paste of the same link doesn't produce a false
-          // "Already downloaded" duplicate hit. Idempotent — removeDriveEntry
-          // is a no-op when the entry is already absent. `deleteStorage:false`
+          // User cancellation is the ONLY path that deletes a seeking entry
+          // (the entry is persisted up-front now). `deleteStorage:false`
           // because the fs.rm above already covers the storage folder.
           await this.removeDriveEntry(driveId, { deleteStorage: false })
         } catch (err) {
@@ -593,6 +634,19 @@ class HyperdriveManager extends EventEmitter {
       }
     }
     this.pendingConnections.set(driveId, pendingConnection)
+
+    // Join swarm for persistent peer discovery (no timeout)
+    const topic = swarm.join(drive.discoveryKey)
+
+    // Log DHT lookup progress
+    topic.flushed().then(() => {
+      console.log('[HyperdriveManager] DHT lookup complete', { driveId, peerConnected })
+    })
+
+    await swarm.flush()
+    // REMOVED: done() - Keep seeking peers indefinitely
+
+    console.log('[HyperdriveManager] Swarm flushed, waiting for drive update...', { driveId, peerConnected })
     
     // Wait for drive to update - NO TIMEOUT, only user cancellation
     // Periodic status updates to show we're still trying
@@ -638,121 +692,36 @@ class HyperdriveManager extends EventEmitter {
       throw err
     }
     
-    // Connection successful - remove from pending
-    this.pendingConnections.delete(driveId)
-    
-    // Only read drive data when we have verified peer connections
-    let files = []
-    let manifest = null
-    let totalBytes = 0
-    let shareName = null
-    let truncated = null
-
-    if (!peerConnected) {
-      console.log('[HyperdriveManager] No peer connected yet - drive remains in seeking state')
-      // Don't read any data - keep drive in seeking state
-    } else {
-      // We have peer connection - safe to read drive data
-      try {
-        const manifestData = await drive.get(DRIVE_MANIFEST_PATH)
-      if (manifestData && manifestData.length <= DRIVE_MANIFEST_MAX_SIZE) {
-        manifest = JSON.parse(manifestData.toString())
-
-        // Validate manifest
-        if (manifest.version === DRIVE_MANIFEST_VERSION && Array.isArray(manifest.files)) {
-          shareName = manifest.name
-          totalBytes = manifest.totalBytes || 0
-
-          // Surface a truncation hint when the manifest declares more files
-          // than the receive cap allows. The slice below caps at 1000; this
-          // signal lets the UI say "showing 1000 of N" instead of silently
-          // dropping the overflow. Matches mobile's `truncated` field shape.
-          truncated = computeTruncation(manifest.files.length, DRIVE_MANIFEST_MAX_FILES)
-
-          // Extract files (with security limits)
-          files = manifest.files.slice(0, DRIVE_MANIFEST_MAX_FILES).map(f => {
-            // Security: validate path doesn't have traversal
-            const safePath = f.path?.replace(/\.\./g, '').replace(/^\/+/, '/')
-            return {
-              name: safePath || f.name,
-              displayName: f.name,
-              size: f.size || 0
-            }
-          })
-          
-          console.log('[HyperdriveManager] Loaded manifest', { 
-            shareName, 
-            files: files.length, 
-            totalBytes 
-          })
-        }
-      }
-      } catch (err) {
-        console.log('[HyperdriveManager] No manifest, falling back to listing', err.message)
-      }
-      
-      // Fallback: list files from drive directly (only when peer connected)
-      if (files.length === 0) {
-        for await (const entry of drive.list('/')) {
-          // Skip manifest file
-          if (entry.key === DRIVE_MANIFEST_PATH) continue
-          
-          files.push({
-            name: entry.key,
-            displayName: path.basename(entry.key),
-            size: entry.value?.blob?.byteLength || 0
-          })
-        }
-        totalBytes = files.reduce((sum, f) => sum + f.size, 0)
-      }
-    } // End peer connected check
-    
-    const session = {
-      driveId,
-      drive,
-      store,
-      swarm,
-      isReceiving: true,
-      manifest,
-      totalBytes,
-      shareName,
-      shareLink,  // IMPORTANT: Save the original share link for history/re-sharing
-      metadata: { key },  // Save key for fallback link generation
-      createdAt: Date.now()
-    }
-    this.activeDrives.set(driveId, session)
-    
-    // First and only persist for this drive — the pre-peer stub write that
-    // used to happen up-front (Cluster 3 in the 5A investigation) has been
-    // removed, so this is where the manifest entry actually comes into
-    // being. Only writes when a peer has actually connected; a
-    // never-connected open ends with no manifest entry, which is what makes
-    // "cancelled or crashed open leaves a stub" impossible.
+    // ONE hydration path for every case: if a peer is already here, hydrate
+    // inline (emit:false — the caller drives the download via the return
+    // value). If not, the entry stays persisted as seeking/manifestLoaded:
+    // false and the swarm connection handler hydrates whenever the provider
+    // finally appears (emit:true → 'drive-ready-to-download' → auto-download).
+    let hydration = null
     if (peerConnected) {
-      await this.addDriveEntry({
-        driveId: driveId,
-        key: drive.key.toString('hex'), // Use canonical drive key format
-        discoveryKey: drive.discoveryKey.toString('hex'),
-        state: 'seeking', // Stay seeking until download completes
-        shareLink: shareLink,
-        isUpload: false,
-        files: files,
-        totalBytes: totalBytes,
-        storagePath: path.join(this.drivesDir, driveId),
-        createdAt: Date.now(),
-        name: shareName || 'Remote Share',
-        lastAttempt: Date.now()
-      })
+      hydration = await this._hydrateReceivingDrive(driveId, { emit: false })
+    } else {
+      console.log('[HyperdriveManager] No peer connected yet - entry persisted, seeking until the sender appears', { driveId })
     }
-    
-    console.log('[HyperdriveManager] Remote drive opened', { 
-      driveId, 
+
+    // Remove from pending AFTER the inline hydration so the connection
+    // handler can't start a competing emit:true hydration in that window.
+    this.pendingConnections.delete(driveId)
+
+    const files = hydration?.files || []
+    const manifest = hydration?.manifest || null
+    const totalBytes = hydration?.totalBytes || 0
+    const shareName = hydration?.shareName || null
+    const truncated = hydration?.truncated || null
+
+    console.log('[HyperdriveManager] Remote drive opened', {
+      driveId,
       files: files.length,
       totalBytes,
       hasManifest: !!manifest,
       peerConnected
     })
-    
+
     return {
       driveId,
       files,
@@ -775,6 +744,143 @@ class HyperdriveManager extends EventEmitter {
       close: async () => {
         await this.stopDrive(driveId, { delete: true })
       }
+    }
+  }
+
+  /**
+   * Hydrate a seeking (receiving) drive once a provider peer is available:
+   * pull the latest drive state, read the wire manifest (or fall back to
+   * listing), persist the real file data (manifestLoaded: true), and — unless
+   * the caller opts out — emit 'drive-ready-to-download' so the frontend
+   * starts the actual download.
+   *
+   * This is THE single hydration path for receives. It is idempotent and
+   * safe to call from every swarm connection, no matter when the peer
+   * arrives: already-hydrated sessions return their cached result, an
+   * in-flight hydration returns null, and a connected peer that turns out to
+   * have no drive data (another downloader, not the provider) leaves the
+   * entry un-hydrated so the next connection retries. That last case is what
+   * keeps "blank because no provider yet" (manifestLoaded: false) honest —
+   * it can never be confused with "provider had nothing".
+   */
+  async _hydrateReceivingDrive(driveId, { emit = true } = {}) {
+    const session = this.activeDrives.get(driveId)
+    if (!session || !session.isReceiving) return null
+    if (session.hydrated) return session.hydration
+    if (session.hydrating) return null
+    const entry = this.manifest.drives[driveId]
+    if (!entry || entry.state !== DriveState.SEEKING) return null
+
+    session.hydrating = true
+    try {
+      const { drive } = session
+
+      // Pull the latest drive state from the connected peer before reading.
+      await drive.update({ wait: true })
+
+      let manifest = null
+      let files = []
+      let totalBytes = 0
+      let shareName = null
+      let truncated = null
+
+      try {
+        const manifestData = await drive.get(DRIVE_MANIFEST_PATH)
+        if (manifestData && manifestData.length <= DRIVE_MANIFEST_MAX_SIZE) {
+          const parsed = JSON.parse(manifestData.toString())
+
+          // Validate manifest
+          if (parsed.version === DRIVE_MANIFEST_VERSION && Array.isArray(parsed.files)) {
+            manifest = parsed
+            shareName = parsed.name
+            totalBytes = parsed.totalBytes || 0
+
+            // Surface a truncation hint when the manifest declares more files
+            // than the receive cap allows. The slice below caps at 1000; this
+            // signal lets the UI say "showing 1000 of N" instead of silently
+            // dropping the overflow. Matches mobile's `truncated` field shape.
+            truncated = computeTruncation(parsed.files.length, DRIVE_MANIFEST_MAX_FILES)
+
+            // Extract files (with security limits)
+            files = parsed.files.slice(0, DRIVE_MANIFEST_MAX_FILES).map(f => {
+              // Security: validate path doesn't have traversal
+              const safePath = f.path?.replace(/\.\./g, '').replace(/^\/+/, '/')
+              return {
+                name: safePath || f.name,
+                displayName: f.name,
+                size: f.size || 0
+              }
+            })
+
+            console.log('[HyperdriveManager] Loaded manifest', {
+              shareName,
+              files: files.length,
+              totalBytes
+            })
+          }
+        }
+      } catch (err) {
+        console.log('[HyperdriveManager] No manifest, falling back to listing', err.message)
+      }
+
+      // Fallback: list files from drive directly
+      if (files.length === 0) {
+        for await (const e of drive.list('/')) {
+          // Skip manifest file
+          if (e.key === DRIVE_MANIFEST_PATH) continue
+
+          files.push({
+            name: e.key,
+            displayName: path.basename(e.key),
+            size: e.value?.blob?.byteLength || 0
+          })
+        }
+        totalBytes = files.reduce((sum, f) => sum + f.size, 0)
+      }
+
+      // No manifest AND no files: the peer wasn't (or wasn't yet) the
+      // provider. Stay un-hydrated; retry on the next connection.
+      if (!manifest && files.length === 0) {
+        console.log('[HyperdriveManager] Connected peer had no drive data yet - still waiting for the provider', { driveId })
+        return null
+      }
+
+      session.manifest = manifest
+      session.totalBytes = totalBytes
+      session.shareName = shareName || files[0]?.displayName || 'Remote Share'
+
+      await this.addDriveEntry({
+        driveId,
+        key: drive.key.toString('hex'), // Use canonical drive key format
+        discoveryKey: drive.discoveryKey.toString('hex'),
+        state: DriveState.SEEKING, // Stay seeking until download completes
+        manifestLoaded: true,
+        shareLink: session.shareLink,
+        isUpload: false,
+        files,
+        totalBytes,
+        storagePath: entry.storagePath,
+        createdAt: entry.createdAt || Date.now(),
+        name: session.shareName
+      })
+
+      session.hydrated = true
+      session.hydration = { files, shareName: session.shareName, totalBytes, manifest, truncated }
+
+      if (emit) {
+        console.log('[HyperdriveManager] Emitting drive-ready-to-download event', { driveId, shareLink: session.shareLink })
+        this.emit('drive-ready-to-download', {
+          driveId,
+          shareLink: session.shareLink,
+          shareName: session.shareName,
+          totalBytes,
+          files
+        })
+      }
+
+      return session.hydration
+    } finally {
+      session.hydrating = false
     }
   }
 
@@ -805,6 +911,12 @@ class HyperdriveManager extends EventEmitter {
       // File system data
       files: driveData.files || [],
       totalBytes: driveData.totalBytes || 0,
+
+      // Receive-side truth flag: false = "file data below is blank ONLY
+      // because no provider has connected yet" (keep seeking, hydrate on the
+      // next peer); true = files/totalBytes reflect the provider's manifest.
+      // Uploads and completed downloads default to true.
+      manifestLoaded: driveData.manifestLoaded !== undefined ? !!driveData.manifestLoaded : true,
       localPath: driveData.localPath || null,
       storagePath: driveData.storagePath || path.join(this.drivesDir, driveId),
       
@@ -1553,55 +1665,87 @@ class HyperdriveManager extends EventEmitter {
     
     // Join swarm to find peers
     const swarm = new Hyperswarm()
-    
-    console.log('[HyperdriveManager] Joining swarm to find sender...', { 
-      driveId, 
+
+    // Register the session BEFORE any peer can connect so the late-hydration
+    // path (_hydrateReceivingDrive) can find it whenever the provider shows
+    // up — including hours after this resume call has settled.
+    const session = {
+      driveId,
+      drive,
+      store,
+      swarm,
+      isReceiving: true,
+      manifest: null,
+      totalBytes: metadata.totalBytes || 0,
+      shareName: metadata.name || null,
+      shareLink: metadata.shareLink,
+      metadata: { key },
+      createdAt: metadata.createdAt || Date.now(),
+      hydrated: false,
+      hydrating: false
+    }
+    this.activeDrives.set(driveId, session)
+
+    console.log('[HyperdriveManager] Joining swarm to find sender...', {
+      driveId,
       discoveryKey: drive.discoveryKey.toString('hex').slice(0, 16) + '...'
     })
-    
+
     let peerConnected = false
     swarm.on('connection', (socket) => {
       peerConnected = true
       console.log('[HyperdriveManager] Connected to peer for download', { driveId })
       store.replicate(socket)
-      
+
       socket.on('error', (err) => {
         console.log('[HyperdriveManager] Download socket error', { driveId, error: err.message })
       })
-      
+
       socket.on('close', () => {
         console.log('[HyperdriveManager] Download peer disconnected', { driveId })
         this.emit('download-peer-disconnected', { driveId })
       })
+
+      // Late-provider hydration: provider appeared after this resume call
+      // settled (e.g. sender came online hours after our reboot). Same
+      // single path as openDrive; idempotent.
+      if (!this.pendingConnections.has(driveId)) {
+        this._hydrateReceivingDrive(driveId).catch(err =>
+          console.log('[HyperdriveManager] Late hydration attempt failed (will retry on next peer)', { driveId, error: err.message }))
+      }
     })
-    
-    // Join swarm for persistent peer discovery (no timeout)
-    const topic = swarm.join(drive.discoveryKey)
-    
-    // Log DHT lookup progress
-    topic.flushed().then(() => {
-      console.log('[HyperdriveManager] DHT lookup complete', { driveId, peerConnected })
-    })
-    
-    await swarm.flush()
-    console.log('[HyperdriveManager] Swarm flushed, waiting for drive update...', { driveId, peerConnected })
-    
-    // Track this pending connection so it can be aborted
+
+    // Track this pending connection so it can be aborted. Registered BEFORE
+    // swarm.join so the connection handler's `pendingConnections.has()` check
+    // can never race a fast peer into double-handling.
     const pendingConnection = {
       driveId,
       aborted: false,
       cleanup: async () => {
         try {
+          this.activeDrives.delete(driveId)
           await swarm.destroy()
           await drive.close()
           await store.close()
-          // NOTE: Don't delete storage path on cleanup - this is a resume, not new download
+          // NOTE: Don't delete storage path or manifest entry on cleanup -
+          // this is a resume, not a new download
         } catch (err) {
           console.log('[HyperdriveManager] Cleanup error (ignored)', err.message)
         }
       }
     }
     this.pendingConnections.set(driveId, pendingConnection)
+
+    // Join swarm for persistent peer discovery (no timeout)
+    const topic = swarm.join(drive.discoveryKey)
+
+    // Log DHT lookup progress
+    topic.flushed().then(() => {
+      console.log('[HyperdriveManager] DHT lookup complete', { driveId, peerConnected })
+    })
+
+    await swarm.flush()
+    console.log('[HyperdriveManager] Swarm flushed, waiting for drive update...', { driveId, peerConnected })
     
     // Wait for drive to update - NO TIMEOUT, only user cancellation
     const REFRESH_INTERVAL_MS = 30000 // Log every 30 seconds
@@ -1649,111 +1793,36 @@ class HyperdriveManager extends EventEmitter {
       throw err
     }
     
-    // If we get here, drive.update() succeeded (peer connected and drive synced)
-    this.pendingConnections.delete(driveId)
-    
-    // Read manifest to get file list
-    let manifest = null
-    let files = []
-    let shareName = 'Remote Share'
-    let totalBytes = 0
-    let truncated = null
-
-    try {
-      const manifestBuffer = await drive.get(DRIVE_MANIFEST_PATH)
-      // Cap the size before parsing — the manifest comes from a remote peer and
-      // an oversized blob could OOM the JSON parse on this resume path (openDrive
-      // already enforces the same limit).
-      if (manifestBuffer && manifestBuffer.length > 0 && manifestBuffer.length <= DRIVE_MANIFEST_MAX_SIZE) {
-        manifest = JSON.parse(manifestBuffer.toString())
-        const declaredCount = Array.isArray(manifest.files) ? manifest.files.length : 0
-        truncated = computeTruncation(declaredCount, DRIVE_MANIFEST_MAX_FILES)
-        files = (manifest.files || []).slice(0, DRIVE_MANIFEST_MAX_FILES)
-        shareName = manifest.name || files[0]?.name || 'Remote Share'
-        totalBytes = manifest.totalBytes || files.reduce((sum, f) => sum + (f.size || 0), 0)
-      } else if (manifestBuffer && manifestBuffer.length > DRIVE_MANIFEST_MAX_SIZE) {
-        throw new EngineError({
-          category: 'receive.manifest-oversized',
-          cause: 'manifest-oversized',
-          message: 'manifest exceeds size limit',
-        })
-      }
-    } catch (err) {
-      console.log('[HyperdriveManager] No manifest found, scanning drive...', { driveId })
-      // Fallback: scan drive for files
-      for await (const entry of drive.list('/')) {
-        if (entry.key !== '/.peardrop.json') {
-          try {
-            const stat = await drive.stat(entry.key)
-            files.push({
-              name: path.basename(entry.key),
-              path: entry.key,
-              size: stat.blob.byteLength
-            })
-            totalBytes += stat.blob.byteLength
-          } catch {}
-        }
-      }
-      if (files.length > 0) {
-        shareName = files.length === 1 ? files[0].name : `${files.length} files`
-      }
-    }
-    
-    // Create session object
-    const session = {
-      driveId,
-      drive,
-      store,
-      swarm,
-      isReceiving: true,
-      manifest,
-      totalBytes,
-      shareName,
-      shareLink: metadata.shareLink,
-      metadata: { key },
-      createdAt: metadata.createdAt || Date.now()
-    }
-    this.activeDrives.set(driveId, session)
-    
-    // Update the existing drive entry with real data now that we have successful connection
-    console.log('[HyperdriveManager] Checking if should emit download event', { driveId, peerConnected })
+    // ONE hydration path, same as openDrive. Peer already here → hydrate now
+    // (emit:true — resumes always auto-continue their download). No peer →
+    // the entry stays seeking and the connection handler hydrates whenever
+    // the provider appears, even days later. Either way this drive keeps
+    // announcing and looking for peers until the user removes it.
+    let hydration = null
     if (peerConnected) {
-      await this.addDriveEntry({
-        driveId: driveId, // Use EXISTING driveId, not new one
-        key: drive.key.toString('hex'),
-        discoveryKey: drive.discoveryKey.toString('hex'),
-        state: 'seeking', // Stay seeking until download completes
-        shareLink: metadata.shareLink,
-        isUpload: false,
-        files: files,
-        totalBytes: totalBytes,
-        storagePath: metadata.storagePath, // Use EXISTING storage path
-        createdAt: metadata.createdAt || Date.now(),
-        name: shareName,
-        lastAttempt: Date.now()
-      })
-      
-      // Emit event to trigger download just like new downloads do
-      console.log('[HyperdriveManager] Emitting drive-ready-to-download event', { driveId, shareLink: metadata.shareLink })
-      this.emit('drive-ready-to-download', {
-        driveId,
-        shareLink: metadata.shareLink,
-        shareName,
-        totalBytes,
-        files
-      })
+      hydration = await this._hydrateReceivingDrive(driveId, { emit: true })
     } else {
-      console.log('[HyperdriveManager] No peer connected, not emitting download event', { driveId })
+      console.log('[HyperdriveManager] Provider not online yet - resumed drive stays seeking until one appears', { driveId })
     }
-    
-    console.log('[HyperdriveManager] Remote drive resumed', { 
-      driveId, 
+
+    // Remove from pending AFTER the inline hydration so the connection
+    // handler can't start a competing hydration in that window.
+    this.pendingConnections.delete(driveId)
+
+    const files = hydration?.files || []
+    const manifest = hydration?.manifest || null
+    const totalBytes = hydration?.totalBytes || 0
+    const shareName = hydration?.shareName || metadata.name || 'Remote Share'
+    const truncated = hydration?.truncated || null
+
+    console.log('[HyperdriveManager] Remote drive resumed', {
+      driveId,
       files: files.length,
       totalBytes,
       hasManifest: !!manifest,
       peerConnected
     })
-    
+
     return {
       driveId,
       files,
