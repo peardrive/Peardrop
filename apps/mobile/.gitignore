@@ -15,3 +15,9 @@ android/build/
 ios/Pods/
 ios/build/
 .DS_Store
+
+# Generated native projects (Continuous Native Generation) — recreate with
+# 'npx expo prebuild'. Release signing intentionally uses the debug keystore
+# (sideload/testing phase), so there is nothing secret in here either.
+/android/
+/ios/

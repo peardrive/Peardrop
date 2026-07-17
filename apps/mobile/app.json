@@ -2,12 +2,15 @@
   "expo": {
     "name": "PearDrop",
     "slug": "peardrop-mobile",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "newArchEnabled": true,
     "orientation": "portrait",
     "scheme": "peardrop.mobile",
     "userInterfaceStyle": "automatic",
-    "assetBundlePatterns": ["**/*", "assets/demo/**/*"],
+    "assetBundlePatterns": [
+      "**/*",
+      "assets/demo/**/*"
+    ],
     "icon": "./assets/images/icon.png",
     "splash": {
       "image": "./assets/images/splash.png",
@@ -23,7 +26,8 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0f2238"
       },
-      "package": "com.peardrop.mobile"
+      "package": "com.peardrop.mobile",
+      "versionCode": 2
     },
     "plugins": [
       [
