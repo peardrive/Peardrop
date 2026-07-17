@@ -540,9 +540,18 @@ belong to PearDrive proper. PearDrop = link sharing + (later) own-device cloud.
 ## Gotchas & Lessons
 
 1. **P2P requires sharer online** - No server, no relay. Share dies = download fails.
+   (Softened v0.25.1: a receive added while the sharer is offline now waits
+   and auto-downloads when they appear — but an in-flight transfer still
+   needs both ends up.)
 2. **Hyperdrive blob metadata** - Not available until blobs sync. Use manifest instead.
 3. **Exec timeout kills shares** - Always use `nohup` for background sharing.
 4. **Progress events are `upload-progress`** - Even for downloads (peerId='self').
+5. **`sysctlbyname for kern.hv_vmm_present failed with status -1` is NOT ours.**
+   Chromium (inside Electron) asks macOS "am I in a VM?" at startup; on Macs
+   whose kernel doesn't expose that sysctl it logs this once to stderr — with
+   no trailing newline, so it glues onto the next real log line. Verified
+   2026-07-17: string lives in the Electron Framework binary, zero references
+   in Peardrop code, zero functional impact. Do not chase it.
 
 ---
 
