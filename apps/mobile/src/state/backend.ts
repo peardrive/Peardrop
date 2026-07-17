@@ -536,6 +536,31 @@ export function BackendProvider({ children }: { children: React.ReactNode }) {
               refreshDrives().catch(() => {});
               return;
             }
+            if (evt.type === "drive-ready-to-download") {
+              // A share we added while its sender was offline just found its
+              // provider (engine-side late hydration — parity with desktop
+              // v0.25.1). Auto-start the grab, exactly as if the user had
+              // tapped Grab in the preview: the entry has been waiting in
+              // the list for this moment, possibly across reboots.
+              appendLog(`Sender online — grabbing: ${evt.shareName || evt.driveId || ""}`);
+              if (evt.driveId) {
+                const driveId = evt.driveId;
+                rememberDriveOrigin(receivedIdsRef.current, driveId);
+                upsertTransfer(driveId, (prev) => ({
+                  ...prev,
+                  origin: "received",
+                  direction: "download",
+                  totalBytes:
+                    typeof evt.totalBytes === "number" ? evt.totalBytes : prev.totalBytes,
+                  lastEventAt: Date.now(),
+                }));
+                invoke(rpcRef.current, RPC_HYPERDRIVE_DOWNLOAD, { driveId }).catch(
+                  (err: unknown) =>
+                    appendLog(`auto-grab: ${String((err as Error)?.message || err)}`)
+                );
+              }
+              return;
+            }
             if (evt.type === "drive-activated") {
               appendLog(`Drive activated: ${evt.driveId ?? ""}`);
               if (evt.driveId) {

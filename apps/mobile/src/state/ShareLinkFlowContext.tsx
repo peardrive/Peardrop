@@ -431,6 +431,19 @@ export function ShareLinkFlowProvider({ children }: { children: React.ReactNode 
           setLinkError(null);
         },
         onSuccess: async (out) => {
+          if (out.driveId && out.peerConnected === false && !(out.files?.length)) {
+            // Sender is offline. The engine has persisted the entry as
+            // seeking (manifestLoaded:false) and will hydrate +
+            // auto-download whenever the sender appears — even after the
+            // app restarts (parity with desktop v0.25.1). No preview to
+            // show yet; tell the user and let the entry wait.
+            haptics.success();
+            setLinkDraftRaw("");
+            showToast(
+              "Sender is offline — saved to your list. It'll grab automatically when they're back.",
+            );
+            return;
+          }
           if (out.driveId) {
             const cls = await reconcileAndDedup(out);
             applyDedupClassification(

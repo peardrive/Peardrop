@@ -42,6 +42,17 @@ export type BackendEvent =
     }
   | { type: "drive-deactivated"; driveId?: string }
   | { type: "drive-hydration-failed"; driveId?: string; error?: string }
+  | {
+      /** Late hydration: a share added while its sender was offline just
+       *  found its provider (parity with desktop v0.25.1). RN auto-starts
+       *  the grab on this event. */
+      type: "drive-ready-to-download";
+      driveId?: string;
+      shareLink?: string;
+      shareName?: string | null;
+      totalBytes?: number;
+      files?: { name: string; displayName?: string; size?: number }[];
+    }
   | { type: "drive-stopped"; driveId?: string; purged?: boolean }
   | { type: "peer-connected"; driveId?: string; peerId?: string; shareName?: string; totalBytes?: number }
   | { type: "peer-disconnected"; driveId?: string; peerId?: string }
@@ -100,6 +111,11 @@ export type OpenLinkResult = {
   shareName?: string | null;
   totalBytes?: number;
   hasManifest?: boolean;
+  /** False when the open resolved without ever seeing the provider: the
+   *  entry is persisted as seeking/manifestLoaded:false and will hydrate +
+   *  auto-download whenever the sender comes online (even after reboots).
+   *  Parity with desktop v0.25.1. */
+  peerConnected?: boolean;
   /** D5.1: set when the share's manifest declares more files than the
    *  1000-entry cap allows. UI may surface a "shown N of M" hint. */
   truncated?: { available: number; shown: number };

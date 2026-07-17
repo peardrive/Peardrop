@@ -124,15 +124,26 @@ async function loadManifest() {
   }
 }
 
-// relocated from manifest-recovery.mjs. Drop any entry stuck
-// in CREATING or SEEKING (crash mid-share-create or mid-open) and rm
-// its corestore folder if we know where it is. Called once from
-// loadManifest during engineInit; not exposed.
+// relocated from manifest-recovery.mjs. Drop any entry stuck in CREATING
+// (crash mid-share-create) and rm its corestore folder if we know where it
+// is. Called once from loadManifest during engineInit; not exposed.
+// SEEKING entries are NOT debris anymore (parity with desktop v0.25.1): a
+// receive added while the provider was offline legitimately persists as
+// SEEKING/manifestLoaded:false, survives reboots, and keeps looking for its
+// sender until the user removes it — engineHydrateDrives resumes them. Only
+// SEEKING entries with no usable key/link (pre-parity crash debris) are
+// still purged.
 async function cleanupInFlightManifestEntries() {
-  const stale = new Set([DriveState.CREATING, DriveState.SEEKING]);
   const toRemove = [];
   for (const [driveId, meta] of Object.entries(manifest.drives || {})) {
-    if (stale.has(meta?.state)) toRemove.push([driveId, meta]);
+    if (meta?.state === DriveState.CREATING) {
+      toRemove.push([driveId, meta]);
+    } else if (
+      meta?.state === DriveState.SEEKING &&
+      !(meta.origin === "received" && /^[a-fA-F0-9]{64}$/.test(String(meta.key || "")))
+    ) {
+      toRemove.push([driveId, meta]);
+    }
   }
   if (toRemove.length === 0) return;
   for (const [driveId, meta] of toRemove) {
@@ -491,6 +502,179 @@ function attachHostSwarm(session) {
   return swarm;
 }
 
+// Receiver-side counterpart of attachHostSwarm, shared by engineOpenDrive
+// and the SEEKING branch of engineHydrateDrives so both wire the SAME
+// connection handler — including the late-provider hydration hook. Parity
+// with desktop v0.25.1's connection handler in openDrive/_resumeSeekingDrive.
+function attachReceiverSwarm(session) {
+  const { driveId, drive, store } = session;
+  const swarm = new Hyperswarm();
+
+  swarm.on("connection", (socket, peerInfo) => {
+    const hex = peerInfo?.publicKey?.toString?.("hex");
+    const peerId = hex ? hex.slice(0, 12) : "peer";
+    emitEvent({ type: "peer-connected", driveId, peerId });
+    store.replicate(socket);
+    socket.on("close", () => {
+      emitEvent({ type: "peer-disconnected", driveId, peerId });
+      emitEvent({ type: "download-peer-disconnected", driveId });
+    });
+
+    // Late-provider hydration: if the sender shows up AFTER the open call
+    // settled (or after a reboot resumed this seeking drive), fetch the
+    // manifest and signal ready-to-download from here. While the original
+    // open is still pending, its inline path handles it instead.
+    // Idempotent — see hydrateReceivingDrive.
+    if (!pendingConnections.has(driveId)) {
+      hydrateReceivingDrive(driveId).catch((err) => {
+        emitEvent({
+          type: "error",
+          message: `late-hydrate ${driveId}: ${String(err?.message || err)}`,
+        });
+      });
+    }
+  });
+
+  const done = drive.findingPeers();
+  swarm.join(drive.discoveryKey);
+  swarm.flush().then(done, done);
+
+  return swarm;
+}
+
+// THE single receive-hydration path (parity with desktop v0.25.1's
+// _hydrateReceivingDrive): once a provider peer is available, pull the
+// latest drive state, read the wire manifest (or fall back to listing),
+// persist the real file data (state ACTIVE + manifestLoaded:true — mobile's
+// receiver lifecycle settles to INACTIVE after the download completes), and
+// unless the caller opts out, emit 'drive-ready-to-download' so RN starts
+// the grab. Idempotent and safe to call from every swarm connection: an
+// already-hydrated session returns its cached result, an in-flight
+// hydration returns null, and a connected peer with no drive data (another
+// downloader, not the provider) leaves the entry un-hydrated so the next
+// connection retries — that is what keeps manifestLoaded:false ("blank
+// because no provider yet") honest, never conflated with "share is empty".
+async function hydrateReceivingDrive(driveId, { emit = true } = {}) {
+  const session = activeDrives.get(driveId);
+  if (!session || !session.isReceiving) return null;
+  if (session.hydrated) return session.hydration;
+  if (session.hydrating) return null;
+  const meta = manifest.drives[driveId];
+  if (!meta || normalizeState(meta.state) !== DriveState.SEEKING) return null;
+
+  session.hydrating = true;
+  try {
+    const { drive } = session;
+
+    // Pull the latest drive state from the connected peer before reading.
+    await drive.update({ wait: true });
+
+    let manifestData = null;
+    let files = [];
+    let totalBytes = 0;
+    let shareName = null;
+    let truncated = null;
+
+    try {
+      const raw = await drive.get(DRIVE_MANIFEST_PATH);
+      if (raw && raw.byteLength <= DRIVE_MANIFEST_MAX_SIZE) {
+        manifestData = JSON.parse(b4a.toString(raw, "utf8"));
+        if (
+          manifestData.version === DRIVE_MANIFEST_VERSION &&
+          Array.isArray(manifestData.files)
+        ) {
+          shareName = manifestData.name;
+          totalBytes = manifestData.totalBytes || 0;
+          // D5.1: surface a truncation hint when the manifest declares more
+          // files than the 1000-entry cap allows.
+          if (manifestData.files.length > DRIVE_MANIFEST_MAX_FILES) {
+            truncated = {
+              available: manifestData.files.length,
+              shown: DRIVE_MANIFEST_MAX_FILES,
+            };
+          }
+          files = manifestData.files.slice(0, DRIVE_MANIFEST_MAX_FILES).map((f) => {
+            // D1.1: when `path` is missing, fall back to the basename.
+            const rawPath = f.path || f.name || "";
+            const safePath = String(rawPath)
+              .replace(/\.\./g, "")
+              .replace(/^\/+/, "/");
+            const finalName = safePath
+              ? safePath.startsWith("/") ? safePath : `/${safePath}`
+              : "";
+            return {
+              name: finalName,
+              displayName: f.name,
+              size: f.size || 0,
+            };
+          });
+        } else {
+          manifestData = null;
+        }
+      }
+    } catch {}
+
+    if (files.length === 0) {
+      for await (const entry of drive.list("/")) {
+        if (entry.key === MANIFEST_DOWNLOAD_SKIP) continue;
+        files.push({
+          name: entry.key,
+          displayName: path.basename(entry.key),
+          size: entry.value?.blob?.byteLength || 0,
+        });
+      }
+      totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    }
+
+    // No manifest AND no files: the peer wasn't (or wasn't yet) the
+    // provider. Stay un-hydrated; retry on the next connection.
+    if (!manifestData && files.length === 0) {
+      return null;
+    }
+
+    // Persist real data. The receiver drive is a first-class manifest entry
+    // — preserved across restarts, eligible for explicit activate/
+    // deactivate. After engineDownload completes it settles into INACTIVE.
+    meta.state = DriveState.ACTIVE;
+    meta.manifestLoaded = true;
+    meta.lastActivityAt = Date.now();
+    meta.name = shareName || meta.name || "Received";
+    meta.totalBytes = totalBytes;
+    meta.files = files.map((f) => ({
+      name: f.displayName || f.name,
+      storagePath: f.name?.replace?.(/^\//, "") || f.name,
+      size: f.size || 0,
+    }));
+    try { await saveManifest(); } catch {}
+
+    session.manifest = manifestData;
+    session.totalBytes = totalBytes;
+    session.shareName = shareName || files[0]?.displayName || "Received";
+    session.files = files;
+
+    // Stream live progress events as blocks land (idempotent per session).
+    bindHyperdriveDownloadTracking(session);
+
+    session.hydrated = true;
+    session.hydration = { files, shareName: session.shareName, totalBytes, manifestData, truncated };
+
+    if (emit) {
+      emitEvent({
+        type: "drive-ready-to-download",
+        driveId,
+        shareLink: session.shareLink,
+        shareName: session.shareName,
+        totalBytes,
+        files,
+      });
+    }
+
+    return session.hydration;
+  } finally {
+    session.hydrating = false;
+  }
+}
+
 // rehydrate previously-active drives from disk on
 // engine boot. Approach A — corestore rehydration. The corestore under
 // `peardrop/drives/<driveId>/` already contains every block ever written,
@@ -524,14 +708,16 @@ export async function engineHydrateDrives() {
     };
   }
 
-  // hydrate both ACTIVE (full hydration — open store, attach swarm)
-  // AND INACTIVE entries (light hydration — RN learns the drive exists, no
-  // swarm contact). The legacy STOPPED state is mapped to INACTIVE so older
-  // manifests behave correctly.
+  // hydrate ACTIVE (full hydration — open store, attach swarm), INACTIVE
+  // (light hydration — RN learns the drive exists, no swarm contact), AND
+  // SEEKING receives (receive-resume — rejoin the topic and keep waiting
+  // for the provider; parity with desktop v0.25.1). The legacy STOPPED
+  // state is mapped to INACTIVE so older manifests behave correctly.
   const entries = Object.values(manifest.drives || {}).filter((d) => {
     if (!d || typeof d !== "object") return false;
     const s = normalizeState(d.state);
-    if (s !== DriveState.ACTIVE && s !== DriveState.INACTIVE) return false;
+    if (s !== DriveState.ACTIVE && s !== DriveState.INACTIVE && s !== DriveState.SEEKING) return false;
+    if (s === DriveState.SEEKING && d.origin !== "received") return false;
     if (!d.key || !/^[a-fA-F0-9]{64}$/.test(String(d.key))) return false;
     if (!d.storagePath) return false;
     if (activeDrives.has(d.driveId)) return false;
@@ -553,6 +739,49 @@ export async function engineHydrateDrives() {
         // RN can surface it if desired; next boot re-attempts.
         recordHydrateFailure(entry.driveId, "Storage directory missing");
         failed++;
+        continue;
+      }
+
+      if (targetState === DriveState.SEEKING) {
+        // Receive-resume: reopen the drive and keep looking for the
+        // provider, exactly like a fresh offline-provider open. When the
+        // sender appears — minutes or days later — attachReceiverSwarm's
+        // late-hydration hook reads the manifest and fires
+        // drive-ready-to-download so RN auto-starts the grab.
+        const store = new Corestore(entry.storagePath);
+        await store.ready();
+        const drive = new Hyperdrive(store, b4a.from(entry.key, "hex"));
+        await drive.ready();
+
+        const session = {
+          driveId: entry.driveId,
+          drive,
+          store,
+          swarm: null,
+          isReceiving: true,
+          manifest: null,
+          totalBytes: Number(entry.totalBytes || 0),
+          shareName: entry.name || null,
+          shareLink: entry.shareLink || createShareLink(entry.key),
+          metadata: entry,
+          files: [],
+          hydrated: false,
+          hydrating: false,
+        };
+        activeDrives.set(entry.driveId, session);
+        const swarm = attachReceiverSwarm(session);
+        session.swarm = swarm;
+
+        resumeErrors.delete(entry.driveId);
+        emitEvent({
+          type: "drive-hydrated",
+          driveId: entry.driveId,
+          shareLink: session.shareLink,
+          key: entry.key,
+          state: DriveState.SEEKING,
+          origin: "received",
+        });
+        hydrated++;
         continue;
       }
 
@@ -878,13 +1107,17 @@ export async function engineOpenDrive(shareLink) {
   const drive = new Hyperdrive(store, b4a.from(keyHex, "hex"));
   await drive.ready();
 
-  // D3.4: persist a SEEKING entry so the corestore folder isn't an orphan
-  // if the user kills the app before the open resolves. The cleanup pass
-  // on next boot removes any SEEKING entries with their storagePath.
+  // Persist the entry IMMEDIATELY (parity with desktop v0.25.1).
+  // `manifestLoaded: false` is the explicit marker for "blank only because
+  // no provider has connected yet" — never conflated with "share is empty".
+  // The entry survives reboots (engineHydrateDrives resumes SEEKING
+  // receives) and keeps looking for the sender until the user removes it.
+  // User cancel (engineAbortOpen → cleanup below) is the only deletion path.
   manifest.drives[driveId] = {
     driveId,
     key: keyHex,
     state: DriveState.SEEKING,
+    manifestLoaded: false,
     origin: "received",
     shareLink: shareLink.trim(),
     storagePath: drivePath,
@@ -896,33 +1129,36 @@ export async function engineOpenDrive(shareLink) {
   };
   await saveManifest();
 
-  const swarm = new Hyperswarm();
+  // Register the session BEFORE any peer can connect so the late-hydration
+  // path (hydrateReceivingDrive, fired from attachReceiverSwarm's connection
+  // handler) can find it no matter when the provider shows up.
+  const session = {
+    driveId,
+    drive,
+    store,
+    swarm: null,
+    isReceiving: true,
+    manifest: null,
+    totalBytes: 0,
+    shareName: null,
+    shareLink: shareLink.trim(),
+    metadata: manifest.drives[driveId],
+    files: [],
+    hydrated: false,
+    hydrating: false,
+  };
+  activeDrives.set(driveId, session);
 
-  swarm.on("connection", (socket, peerInfo) => {
-    // Derive a stable 12-char peerId from the remote public key so multiple
-    // senders on the same received drive don't collapse into one entry in
-    // the RN-side peerIds set (which dedupes by string).
-    const hex = peerInfo?.publicKey?.toString?.("hex");
-    const peerId = hex ? hex.slice(0, 12) : "peer";
-    emitEvent({ type: "peer-connected", driveId, peerId });
-    store.replicate(socket);
-    socket.on("close", () => {
-      emitEvent({ type: "peer-disconnected", driveId, peerId });
-      emitEvent({ type: "download-peer-disconnected", driveId });
-    });
-  });
-
-  const done = drive.findingPeers();
-  swarm.join(drive.discoveryKey);
-  await swarm.flush();
-  done();
-
+  // Registered BEFORE the swarm joins so the connection handler's
+  // `pendingConnections.has()` check can never race a fast peer into
+  // double-handling (inline + late paths).
   const pendingConnection = {
     driveId,
     aborted: false,
     cleanup: async () => {
+      activeDrives.delete(driveId);
       try {
-        await swarm.destroy();
+        await session.swarm?.destroy();
       } catch {}
       try {
         await drive.close();
@@ -933,8 +1169,7 @@ export async function engineOpenDrive(shareLink) {
       try {
         await fs.rm(drivePath, { recursive: true, force: true });
       } catch {}
-      // D3.4: drop the SEEKING manifest entry so we don't leak a stale
-      // record pointing at a folder we just removed.
+      // User cancellation is the ONLY path that deletes a seeking entry.
       if (manifest.drives[driveId]) {
         delete manifest.drives[driveId];
         try {
@@ -944,6 +1179,11 @@ export async function engineOpenDrive(shareLink) {
     },
   };
   pendingConnections.set(driveId, pendingConnection);
+
+  // Shared receiver swarm wiring (peer events, replicate, late-hydration
+  // hook) — same handler the boot-resume path uses.
+  const swarm = attachReceiverSwarm(session);
+  session.swarm = swarm;
 
   const updatePromise = drive.update({ wait: true });
   const abortPromise = new Promise((_, reject) => {
@@ -980,117 +1220,41 @@ export async function engineOpenDrive(shareLink) {
     };
   }
 
+  // ONE hydration path for every case (parity with desktop v0.25.1): if the
+  // provider is already here, hydrate inline (emit:false — the RN caller
+  // drives the grab from this return value via the preview modal). If not,
+  // the entry stays SEEKING/manifestLoaded:false, the session keeps
+  // announcing, and attachReceiverSwarm's connection handler hydrates
+  // whenever the provider finally appears (emit:true →
+  // 'drive-ready-to-download' → RN auto-starts the grab).
+  const hydration = await hydrateReceivingDrive(driveId, { emit: false });
+
+  // Remove from pending AFTER the inline hydration so the connection
+  // handler can't start a competing emit:true hydration in that window.
   pendingConnections.delete(driveId);
 
-  let files = [];
-  let manifestData = null;
-  let totalBytes = 0;
-  let shareName = null;
-  let truncated = null;
-
-  try {
-    const raw = await drive.get(DRIVE_MANIFEST_PATH);
-    if (raw && raw.byteLength <= DRIVE_MANIFEST_MAX_SIZE) {
-      manifestData = JSON.parse(b4a.toString(raw, "utf8"));
-      if (
-        manifestData.version === DRIVE_MANIFEST_VERSION &&
-        Array.isArray(manifestData.files)
-      ) {
-        shareName = manifestData.name;
-        totalBytes = manifestData.totalBytes || 0;
-        // D5.1: surface a truncation hint when the manifest declares more
-        // files than the 1000-entry cap allows. The cap is wire-level
-        // (DRIVE_MANIFEST_MAX_FILES) and applies equally to both sides;
-        // before this hint, mobile silently dropped the overflow.
-        if (manifestData.files.length > DRIVE_MANIFEST_MAX_FILES) {
-          truncated = {
-            available: manifestData.files.length,
-            shown: DRIVE_MANIFEST_MAX_FILES,
-          };
-        }
-        files = manifestData.files.slice(0, DRIVE_MANIFEST_MAX_FILES).map((f) => {
-          // D1.1: when `path` is missing from the manifest entry, fall back
-          // to the basename. Previous behavior produced `name: "/"` which
-          // the receiver can't `drive.get`. Matches desktop's fallback.
-          const rawPath = f.path || f.name || "";
-          const safePath = String(rawPath)
-            .replace(/\.\./g, "")
-            .replace(/^\/+/, "/");
-          const finalName = safePath
-            ? safePath.startsWith("/") ? safePath : `/${safePath}`
-            : "";
-          return {
-            name: finalName,
-            displayName: f.name,
-            size: f.size || 0,
-          };
-        });
-      }
-    }
-  } catch {}
-
-  if (files.length === 0) {
-    for await (const entry of drive.list("/")) {
-      if (entry.key === MANIFEST_DOWNLOAD_SKIP) continue;
-      files.push({
-        name: entry.key,
-        displayName: path.basename(entry.key),
-        size: entry.value?.blob?.byteLength || 0,
-      });
-    }
-    totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  if (!hydration) {
+    return {
+      ok: true,
+      driveId,
+      files: [],
+      shareName: null,
+      totalBytes: 0,
+      hasManifest: false,
+      peerConnected: false,
+      truncated: null,
+    };
   }
-
-  // transition the SEEKING entry to ACTIVE rather than deleting
-  // it. The receiver drive is now a first-class manifest entry — preserved
-  // across restarts, eligible for explicit activate/deactivate. After
-  // engineDownload completes the entry settles into INACTIVE.
-  const meta = manifest.drives[driveId] || {};
-  meta.driveId = driveId;
-  meta.key = keyHex;
-  meta.state = DriveState.ACTIVE;
-  meta.origin = "received";
-  meta.shareLink = shareLink.trim();
-  meta.storagePath = drivePath;
-  meta.lastActivityAt = Date.now();
-  meta.name = shareName || meta.name || "Received";
-  meta.totalBytes = totalBytes;
-  meta.files = files.map((f) => ({
-    name: f.displayName || f.name,
-    storagePath: f.name?.replace?.(/^\//, "") || f.name,
-    size: f.size || 0,
-  }));
-  manifest.drives[driveId] = meta;
-  try { await saveManifest(); } catch {}
-
-  const session = {
-    driveId,
-    drive,
-    store,
-    swarm,
-    isReceiving: true,
-    manifest: manifestData,
-    totalBytes,
-    shareName,
-    shareLink: shareLink.trim(),
-    metadata: meta,
-    files,
-  };
-  activeDrives.set(driveId, session);
-
-  // stream live progress events as blocks land,
-  // not just one event per file-completion. Hooks blobs.core / db.core
-  // 'download' so the receiver UI shows real movement on big files.
-  bindHyperdriveDownloadTracking(session);
 
   return {
     ok: true,
     driveId,
-    files,
-    shareName,
-    totalBytes,
-    hasManifest: !!manifestData,
-    truncated,
+    files: hydration.files,
+    shareName: hydration.shareName,
+    totalBytes: hydration.totalBytes,
+    hasManifest: !!hydration.manifestData,
+    peerConnected: true,
+    truncated: hydration.truncated,
   };
 }
 

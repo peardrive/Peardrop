@@ -68,14 +68,16 @@ finally appears (`_hydrateReceivingDrive`, triggered from every swarm
 connection). Verified by the real-DHT harness: `npm run test:p2p` (online /
 offline-provider / reboot-survival). See Rules below and CHANGELOG v0.25.1.
 
-> ⚠️ **ENGINE PARITY DEBT (2026-07-16):** the mobile backend
-> (`apps/mobile/backend/hyperdrive-engine.mjs`) still has the equivalent bug in
-> different clothes: it persists SEEKING up-front but (a) boot
-> `cleanupInFlightManifestEntries()` DELETES all SEEKING entries as crash
-> debris, (b) a no-peer open transitions to ACTIVE with `files: []` (the exact
-> "blank because empty" confusion), (c) no late-connection hydration. Wire
-> compatibility is unaffected (manifest schema/links/topics unchanged), but the
-> UX parity port is pending — see the plan in the session notes / ask Guy.
+> ✅ **ENGINE PARITY (resolved 2026-07-16):** the mobile backend now carries
+> the same fix (`hydrateReceivingDrive` + `attachReceiverSwarm` +
+> `manifestLoaded` in `apps/mobile/backend/hyperdrive-engine.mjs`; boot keeps
+> legitimate SEEKING receives; RN auto-grabs on `drive-ready-to-download`).
+> **Cross-engine gate:** `cd apps/mobile && npm run test:parity` runs the REAL
+> mobile engine under the Bare runtime against the REAL desktop engine under
+> node, over the real DHT — both online directions plus offline-provider and
+> reboot-survival. Run it after ANY change to either engine's receive/share
+> path. The wire contract (peardrop:// links, DHT topics, /.peardrop.json)
+> must never change on one side alone.
 
 ---
 
